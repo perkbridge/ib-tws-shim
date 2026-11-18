@@ -1,9 +1,14 @@
 # IB licence notes
 
-Status on 2026-11-18: **the licence text inside IB's installer has NOT been read**.
-Only IB's public changelog statement has been verified. The repository licence
-(`LICENSE`, GPL-3.0-or-later) is a working assumption until the installer's own
-licence file is quoted below.
+Status on 2026-11-18: IB's TWS API licence text was pasted by the PO and it is
+the standard GNU GPL version 3 (header "Version 3, 29 June 2007"). This agrees
+with IB's changelog statement. Not yet confirmed: which exact package version the
+text came from (the release thread's `ib-pin refresh` will quote the LICENSE file
+of the pinned package), and whether the pasted text carries any additional terms
+or exception after the standard GPLv3 body (the relay copy was truncated, so only
+the opening was seen here). The conflicting third-party PyPI "Non-Commercial"
+label noted above is still unexplained. The repository licence (`LICENSE`,
+GPL-3.0-or-later) stays as is.
 
 ## What was verified
 
@@ -53,4 +58,11 @@ installer settles it.
 
 ## Licence file text (installer)
 
-_Not yet provided._
+Source: pasted by the PO (message in the release thread, 2026-11-18 18:21Z), not
+read by Claude from the installer. Package version: not yet confirmed.
+
+Seen: the standard GNU General Public License, Version 3, 29 June 2007, with its
+usual Preamble and Terms and Conditions. The copy available to this thread was
+cut off partway through section 2, so the end of the text (and any added terms)
+is NOT VERIFIED here. To close this: compare the LICENSE file from the pinned
+package (`ib-pin refresh`) with the GPLv3 text in `LICENSE`.
