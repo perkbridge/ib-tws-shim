@@ -1,5 +1,5 @@
 #!/bin/sh
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: GPL-3.0-only
 #
 # Fetches IB's official TWS API installer by pinned SHA-256 into .cache/ (never
 # committed), runs it unattended into a throwaway directory and prints the path

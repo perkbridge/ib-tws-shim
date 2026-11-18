@@ -4,7 +4,7 @@ A protocol adapter. It puts the `perkbridge.ibshim/v1` protocol on a unix socket
 front of Interactive Brokers' official Java client (TWS API), so that a program in any
 language can use IB's API without linking IB's code.
 
-Licence: GPL-3.0-or-later (see `LICENSE`; the open licence question about IB's side is
+Licence: GPL-3.0-only (see `LICENSE`; PO decision: public repo; the open licence question about IB's side is
 in `LICENSE-IB-NOTES.md`).
 
 ## What it is and is not
@@ -74,3 +74,17 @@ changed between library versions (for example `cancelOrder` taking a string or a
 `OrderCancel`). Nothing needs IB's jar to compile. If a call does not match the loaded
 library, the op fails with `unsupported_op` and a log line `api_mismatch`; the shim does
 not guess.
+
+## Building the jar (contains no IB classes)
+
+```
+mvn -q package        # runs the 61 tests, writes target/ib-tws-shim.jar
+unzip -l target/ib-tws-shim.jar | grep -c 'com/ib'   # must print 0
+java -jar target/ib-tws-shim.jar --api-jar /path/to/TwsApi.jar ...
+```
+
+The jar holds only `org/perkbridge/ibshim/**` and the Maven metadata. IB's
+`TwsApi.jar` is never part of it: it is passed at run time with `--api-jar`
+and comes from IB's own installer on the customer's host (`scripts/fetch-twsapi.sh`).
+The IB test double under `src/test/java/com/ib/client` is test-only and is not
+packaged. Tags are source tags; build the jar from the tag with the command above.

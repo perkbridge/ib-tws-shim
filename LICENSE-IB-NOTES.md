@@ -7,8 +7,12 @@ text came from (the release thread's `ib-pin refresh` will quote the LICENSE fil
 of the pinned package), and whether the pasted text carries any additional terms
 or exception after the standard GPLv3 body (the relay copy was truncated, so only
 the opening was seen here). The conflicting third-party PyPI "Non-Commercial"
-label noted above is still unexplained. The repository licence (`LICENSE`,
-GPL-3.0-or-later) stays as is.
+label noted above is still unexplained. PO decision 2026-11-18: this shim is
+GPLv3 and will be public. The repository is **GPL-3.0-only**: the API source
+headers (which say "only" or "or later") have NOT been read, because nothing is
+downloaded from IB before the PO says so, so the narrower choice is used. It can
+be relaxed to "or later" if those headers allow it; "only" can never conflict
+with IB's GPLv3.
 
 ## What was verified
 
@@ -76,7 +80,7 @@ the release thread). This fixes the package version for the pasted text above as
 10.52.01 and the installer licence page as GPLv3.
 
 Still open:
-- GPLv3-only versus "or later": check the licence headers in the API source files.
+- GPLv3-only versus "or later": repo uses "only" until the API source headers are read; relax then if they allow.
 - Lawyer review of the process boundary (shim over a local socket, IB jar loaded
   at the customer's site).
 - Make this repository public under GPLv3 before any public image ships.

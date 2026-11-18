@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 // TEST DOUBLE. Not IB code: a minimal stand-in written for this repository so the
 // adapter can be exercised without IB's library. Names mirror the public API shape.
 package com.ib.client;
