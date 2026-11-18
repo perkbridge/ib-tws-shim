@@ -218,7 +218,11 @@ values; mapping them to a client's own states is the client's business, not the 
 ## Process contract
 
 - Binary: `ib-tws-shim.jar`, started by a supervisor: `java -jar ib-tws-shim.jar --socket /run/ibshim/ibshim.sock
-  --api-jar <path to downloaded TwsApi.jar> --log-level info`.
+  --api-jar <path to downloaded TwsApi.jar>[:<more jars>] --log-level info`.
+  `--api-jar` takes one or more jars separated by `:`. IB's `TwsApi.jar`
+  of some versions (e.g. 1050.02) needs `protobuf-java` at run time, so
+  pass both, e.g. `--api-jar TwsApi.jar:protobuf-java.jar`. The shim does
+  not ship protobuf; the jar comes from the host.
 - Exit codes: `0` on `SIGTERM`, `2` bad arguments, `3` API jar missing
   or unloadable, `4` socket path unusable. The shim also exits `1` if its accept loop ends unexpectedly.
   A supervisor should treat any exit as a failure.
