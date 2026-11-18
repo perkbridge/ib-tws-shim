@@ -66,3 +66,17 @@ usual Preamble and Terms and Conditions. The copy available to this thread was
 cut off partway through section 2, so the end of the text (and any added terms)
 is NOT VERIFIED here. To close this: compare the LICENSE file from the pinned
 package (`ib-pin refresh`) with the GPLv3 text in `LICENSE`.
+
+### Screenshot evidence (2026-11-18)
+
+The PO ran the real TWS API 10.52.01 installer on the Mac (window title
+"Setup - TWS API 1052.01"). Its "License Agreement" page shows the GNU General
+Public License, Version 3, 29 June 2007 (screenshot seen by Claude, relayed from
+the release thread). This fixes the package version for the pasted text above as
+10.52.01 and the installer licence page as GPLv3.
+
+Still open:
+- GPLv3-only versus "or later": check the licence headers in the API source files.
+- Lawyer review of the process boundary (shim over a local socket, IB jar loaded
+  at the customer's site).
+- Make this repository public under GPLv3 before any public image ships.
