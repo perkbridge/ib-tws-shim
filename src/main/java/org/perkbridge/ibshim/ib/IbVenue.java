@@ -56,11 +56,13 @@ public final class IbVenue implements Venue {
     private volatile Sink sink;
     private volatile boolean connected;
     private volatile Conn conn;
+    private volatile java.net.Socket pendingSocket;
 
     private final Map<String, AtomicLong> dropped = new ConcurrentHashMap<>();
 
     /** Per-connection state touched by callbacks. */
     private static final class Conn {
+        final Object lock = new Object(); // orders "connected" against the gateway closing
         final CountDownLatch nextId = new CountDownLatch(1);
         final CountDownLatch accounts = new CountDownLatch(1);
         volatile long nextValidId = -1;
@@ -145,6 +147,14 @@ public final class IbVenue implements Venue {
     @Override
     public void detach() {
         // a connect that is still waiting holds the monitor: wake it first
+        java.net.Socket ps = pendingSocket;
+        if (ps != null) {
+            try {
+                ps.close(); // frees an eConnect that is blocked in socket I/O
+            } catch (java.io.IOException ignored) {
+                // already closed
+            }
+        }
         Conn pending = conn;
         if (pending != null) {
             pending.aborted = true;
@@ -329,6 +339,22 @@ public final class IbVenue implements Venue {
         return Reflect.call(client, method, args);
     }
 
+    /**
+     * A call that may already have reached the gateway when it fails: its failures are
+     * {@code venue_error} (ambiguous for the client, which reconciles), never {@code bad_request}.
+     * A call the library does not offer at all was certainly not made and keeps its own error.
+     */
+    private Object callAmbiguous(String method, Object... args) throws OpException {
+        try {
+            return Reflect.call(client, method, args);
+        } catch (Reflect.MissingMemberException e) {
+            throw e;
+        } catch (RuntimeException | LinkageError e) {
+            log.error("ib_call_failed", "call", method, "error", e.toString());
+            throw new OpException(OpException.VENUE_ERROR, method + " failed inside the IB client; the outcome is unknown");
+        }
+    }
+
     private Object newOf(String className) {
         return Reflect.newInstance(cls(className));
     }
@@ -353,11 +379,30 @@ public final class IbVenue implements Venue {
         connected = false;
 
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+        // The socket is opened here, with a connect timeout and a read timeout for IB's blocking
+        // handshake, so that a silent host cannot hold the client slot; detach() can close it.
+        java.net.Socket sock = new java.net.Socket();
+        pendingSocket = sock;
         try {
-            Reflect.call(client, "eConnect", host, (long) port, (long) clientId);
-        } catch (RuntimeException e) {
+            sock.connect(new java.net.InetSocketAddress(host, port), timeoutMs);
+            sock.setTcpNoDelay(true);
+            sock.setSoTimeout(timeoutMs);
+            Reflect.call(client, "eConnect", sock, (long) clientId);
+            sock.setSoTimeout(0);
+        } catch (java.io.IOException | RuntimeException e) {
+            boolean gone = c.aborted;
+            try {
+                sock.close();
+            } catch (java.io.IOException ignored) {
+                // closing after failure
+            }
             teardown(false);
-            throw new OpException(OpException.VENUE_ERROR, "could not connect to " + host + ":" + port + ": " + e.getMessage());
+            if (gone) {
+                throw new OpException(OpException.NOT_CONNECTED, "the client went away while connecting");
+            }
+            throw new OpException(OpException.VENUE_ERROR, "could not connect to " + host + ":" + port + ": " + e.getMessage(), 502);
+        } finally {
+            pendingSocket = null;
         }
         if (!Boolean.TRUE.equals(safeIsConnected(client))) {
             int code = c.lastErrorCode;
@@ -379,13 +424,6 @@ public final class IbVenue implements Venue {
             if (c.aborted) {
                 teardown(false);
                 throw new OpException(OpException.NOT_CONNECTED, "the client went away while connecting");
-            }
-            if (c.closedEarly) {
-                int code = c.firstErrorCode;
-                String msg = c.firstErrorMessage;
-                teardown(false);
-                throw new OpException(OpException.VENUE_ERROR,
-                        "the gateway closed the connection during the handshake" + (msg.isEmpty() ? "" : ": " + msg), code);
             }
             if (!got) {
                 int code = c.firstErrorCode;
@@ -421,8 +459,21 @@ public final class IbVenue implements Venue {
             ev.put("connection_time_raw", ct);
         }
         ev.put("client_id", (long) clientId);
-        c.connectedSent = true;
-        emitC(c, "connected", ev);
+        boolean closed;
+        synchronized (c.lock) {
+            closed = c.closedEarly;
+            if (!closed) {
+                c.connectedSent = true;
+                emitC(c, "connected", ev);
+            }
+        }
+        if (closed) {
+            int code = c.firstErrorCode;
+            String msg = c.firstErrorMessage;
+            teardown(false);
+            throw new OpException(OpException.VENUE_ERROR,
+                    "the gateway closed the connection during the handshake" + (msg.isEmpty() ? "" : ": " + msg), code);
+        }
         log.info("gateway_connected", "host", host, "port", port, "client_id", clientId);
         return r;
     }
@@ -439,8 +490,22 @@ public final class IbVenue implements Venue {
                 try {
                     Reflect.call(rd0, "processMsgs");
                 } catch (RuntimeException e) {
-                    log.warn("ib_reader_error", "error", e.toString());
-                    onCallback(c, "error", new Object[] {new IllegalStateException(e.toString())});
+                    // IB lost a message it could not decode: a hole in the stream. End the session so
+                    // the client reconnects and reconciles instead of trusting what follows.
+                    failure = "decode failure: " + e;
+                    log.error("ib_decode_failed", "error", String.valueOf(e));
+                    Sink sk = sink;
+                    if (sk != null && !c.dead) {
+                        sk.abort("ib_decode_failed");
+                    }
+                    break;
+                }
+            }
+            if (failure == null && !c.dead) {
+                try {
+                    Reflect.call(rd0, "processMsgs"); // messages queued before the socket closed
+                } catch (RuntimeException ignored) {
+                    // nothing left to read
                 }
             }
         } catch (Throwable t) { // a LinkageError must not end this thread silently
@@ -449,18 +514,27 @@ public final class IbVenue implements Venue {
                 log.error("ib_reader_failed", "error", failure);
             }
         }
+        if (failure != null) {
+            try {
+                Reflect.call(cl0, "eDisconnect"); // never leave a gateway session nobody reads
+            } catch (RuntimeException ignored) {
+                // already closed
+            }
+        }
         if (c.userDisconnect || c.dead || conn != c) {
             return;
         }
-        if (!c.connectedSent) {
-            // the gateway closed during the handshake: wake connect, which answers with an error
-            c.closedEarly = true;
-            c.nextId.countDown();
-            c.accounts.countDown();
-        } else if (failure != null) {
-            connectionClosed(c, "error", failure);
-        } else {
-            connectionClosed(c, "gateway_closed", "gateway socket closed");
+        synchronized (c.lock) {
+            if (!c.connectedSent) {
+                // the gateway closed during the handshake: wake connect, which answers with an error
+                c.closedEarly = true;
+                c.nextId.countDown();
+                c.accounts.countDown();
+            } else if (failure != null) {
+                connectionClosed(c, "error", failure);
+            } else {
+                connectionClosed(c, "gateway_closed", "gateway socket closed");
+            }
         }
     }
 
@@ -475,12 +549,6 @@ public final class IbVenue implements Venue {
                 log.debug("disconnect_failed", "error", e.toString());
             }
         }
-        if (emitRequested && conn0 != null && !conn0.disconnectedSent) {
-            conn0.disconnectedSent = true;
-            Map<String, Object> d = new LinkedHashMap<>();
-            d.put("reason", "requested");
-            emitC(conn0, "disconnected", d);
-        }
         if (conn0 != null) {
             conn0.dead = true; // late callbacks of this connection go nowhere
         }
@@ -489,10 +557,20 @@ public final class IbVenue implements Venue {
             t.interrupt();
             if (t != Thread.currentThread()) {
                 try {
-                    t.join(500); // a late callback must not reach the next connection or client
+                    t.join(500);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 }
+            }
+        }
+        // announce a requested disconnect last, so no event of this connection can follow it
+        if (emitRequested && conn0 != null && !conn0.disconnectedSent) {
+            conn0.disconnectedSent = true;
+            Map<String, Object> d = new LinkedHashMap<>();
+            d.put("reason", "requested");
+            Sink sk = sink;
+            if (sk != null) {
+                sk.event("disconnected", d);
             }
         }
         client = null;
@@ -506,8 +584,16 @@ public final class IbVenue implements Venue {
     }
 
     private void connectionClosed(Conn c, String reason, String message) {
-        if (c.disconnectedSent || !c.connectedSent) {
-            return; // never report a disconnect for a connection that was not announced
+        synchronized (c.lock) {
+            if (!c.connectedSent) {
+                c.closedEarly = true; // never report a disconnect for a connection that was not announced
+                c.nextId.countDown();
+                c.accounts.countDown();
+                return;
+            }
+        }
+        if (c.disconnectedSent) {
+            return;
         }
         c.disconnectedSent = true;
         connected = false;
@@ -566,7 +652,7 @@ public final class IbVenue implements Venue {
             copy.put("good_till_date", Times.toIb(reqStr(copy, "good_till_date")));
         }
         Mapper.in(copy, Mapper.ORDER, order);
-        call("placeOrder", (long) orderId, contract, order);
+        callAmbiguous("placeOrder", (long) orderId, contract, order);
         return empty();
     }
 
@@ -577,13 +663,13 @@ public final class IbVenue implements Venue {
         String manual = str(a, "manual_time", false);
         String ib = manual == null ? "" : Times.toIb(manual);
         try {
-            call("cancelOrder", (long) id, ib);
+            callAmbiguous("cancelOrder", (long) id, ib);
         } catch (Reflect.MissingMemberException e) {
             Object oc = newOf("com.ib.client.OrderCancel");
             if (manual != null) {
                 Reflect.set(oc, "manualOrderCancelTime", ib);
             }
-            call("cancelOrder", (long) id, oc);
+            callAmbiguous("cancelOrder", (long) id, oc);
         }
         return empty();
     }
@@ -592,6 +678,7 @@ public final class IbVenue implements Venue {
         if (strictKeys) {
             strict(c, CONTRACT_KEYS, "contract");
         }
+        decimalAny(c, "strike");
         Object k = newOf("com.ib.client.Contract");
         Mapper.in(c, Mapper.CONTRACT, k);
         return k;
@@ -911,6 +998,9 @@ public final class IbVenue implements Venue {
                 emitC(c, "pnl_single", d);
             }
             case "tickPrice" -> {
+                if (Mapper.unset(ar[2])) {
+                    break; // IB's "no price" marker is not a price
+                }
                 d.put("req_id", num(ar[0]));
                 d.put("tick_type", num(ar[1]));
                 d.put("price", Mapper.decimalString(ar[2]));
@@ -1129,10 +1219,14 @@ public final class IbVenue implements Venue {
         if (!(v instanceof String s)) {
             throw new IllegalArgumentException(key + " must be a decimal string");
         }
+        BigDecimal b;
         try {
-            new BigDecimal(s);
+            b = new BigDecimal(s);
         } catch (NumberFormatException e) {
             throw new IllegalArgumentException(key + " is not a decimal: " + s);
+        }
+        if (Double.isInfinite(b.doubleValue())) {
+            throw new IllegalArgumentException(key + " is out of range");
         }
     }
 
@@ -1153,6 +1247,9 @@ public final class IbVenue implements Venue {
             b = new BigDecimal(s);
         } catch (NumberFormatException e) {
             throw new IllegalArgumentException(key + " is not a decimal: " + s);
+        }
+        if (Double.isInfinite(b.doubleValue())) {
+            throw new IllegalArgumentException(key + " is out of range");
         }
         if (positive && b.signum() <= 0) {
             throw new IllegalArgumentException(key + " must be greater than zero");

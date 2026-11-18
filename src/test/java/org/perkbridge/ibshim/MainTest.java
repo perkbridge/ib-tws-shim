@@ -109,8 +109,11 @@ class MainTest {
                 assertEquals("client_version=66", res.get("api_client"));
                 assertTrue(((List<?>) res.get("ops")).contains("place_order"));
                 // IB classes came from the jar through the adapter loader: a connect reaches the test double
-                java.util.Map<String, Object> cn = c.call("connect", "{\"host\":\"127.0.0.1\",\"port\":4002,\"client_id\":1}");
-                assertEquals(Boolean.TRUE, cn.get("ok"), String.valueOf(cn));
+                try (java.net.ServerSocket gw = new java.net.ServerSocket(0, 5, java.net.InetAddress.getLoopbackAddress())) {
+                    java.util.Map<String, Object> cn = c.call("connect",
+                            "{\"host\":\"127.0.0.1\",\"port\":" + gw.getLocalPort() + ",\"client_id\":1}");
+                    assertEquals(Boolean.TRUE, cn.get("ok"), String.valueOf(cn));
+                }
             }
             p.destroy(); // SIGTERM
             assertTrue(p.waitFor(10, TimeUnit.SECONDS));

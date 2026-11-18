@@ -36,7 +36,8 @@ final class Session implements Sink {
     private static final class Out {
         byte[] bytes;
         final String key;
-        boolean dead; // replaced by a newer conflatable event; skipped by the writer
+        Out prev;
+        Out next;
 
         Out(byte[] bytes, String key) {
             this.bytes = bytes;
@@ -51,13 +52,64 @@ final class Session implements Sink {
     private final ServerConfig cfg;
 
     private final Object lock = new Object();
-    private final Deque<Out> queue = new ArrayDeque<>();
+    private final Q queue = new Q();
+
+    /** Intrusive FIFO list: a replaced tick is unlinked in O(1), so it frees its memory at once. */
+    private static final class Q {
+        Out head;
+        Out tail;
+
+        boolean isEmpty() {
+            return head == null;
+        }
+
+        void addLast(Out o) {
+            o.prev = tail;
+            o.next = null;
+            if (tail == null) {
+                head = o;
+            } else {
+                tail.next = o;
+            }
+            tail = o;
+        }
+
+        Out pollFirst() {
+            Out o = head;
+            if (o != null) {
+                remove(o);
+            }
+            return o;
+        }
+
+        void remove(Out o) {
+            if (o.prev == null) {
+                head = o.next;
+            } else {
+                o.prev.next = o.next;
+            }
+            if (o.next == null) {
+                tail = o.prev;
+            } else {
+                o.next.prev = o.prev;
+            }
+            o.prev = null;
+            o.next = null;
+        }
+
+        void clear() {
+            head = null;
+            tail = null;
+        }
+    }
     private final Map<String, Out> conflate = new HashMap<>();
     private long queuedBytes;
     private boolean closed;
     private boolean closeAfterFlush;
     private String closeReason = "";
     private volatile boolean done;
+    private static final int MAX_PENDING_OPS = 64;
+    private final java.util.concurrent.atomic.AtomicInteger pendingOps = new java.util.concurrent.atomic.AtomicInteger();
     private volatile boolean helloSeen;
     private final java.util.concurrent.ExecutorService ops =
             java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
@@ -188,7 +240,7 @@ final class Session implements Sink {
             return true;
         }
         Object id = req.get("id");
-        if (id != null && !(id instanceof String) && !(id instanceof Long)) {
+        if (id != null && !(id instanceof String)) {
             sendError(null, OpException.BAD_REQUEST, "id must be a string");
             return true;
         }
@@ -214,8 +266,19 @@ final class Session implements Sink {
         final Object fid = id;
         final String fop = op;
         final Map<String, Object> fargs = args;
+        if (pendingOps.incrementAndGet() > MAX_PENDING_OPS) {
+            sendError(id, OpException.BAD_REQUEST, "too many requests waiting");
+            closeAfterFlush("too_many_pending_ops");
+            return false;
+        }
         try {
-            ops.execute(() -> process(fid, fop, fargs));
+            ops.execute(() -> {
+                try {
+                    process(fid, fop, fargs);
+                } finally {
+                    pendingOps.decrementAndGet();
+                }
+            });
         } catch (java.util.concurrent.RejectedExecutionException e) {
             return false; // session is ending
         }
@@ -391,7 +454,7 @@ final class Session implements Sink {
 
     /**
      * Appends a line. A conflatable event replaces an older queued event with the
-     * same key by tombstoning it and appending the new one at the tail, so queue
+     * same key by unlinking it and appending the new one at the tail, so queue
      * order and seq order stay the same.
      *
      * @return true when the queue passed its cap
@@ -400,7 +463,7 @@ final class Session implements Sink {
         byte[] bytes = (line + "\n").getBytes(StandardCharsets.UTF_8);
         Out existing = key == null ? null : conflate.get(key);
         if (existing != null) {
-            existing.dead = true;
+            queue.remove(existing);
             queuedBytes -= existing.bytes.length;
         }
         Out o = new Out(bytes, key);
@@ -434,9 +497,6 @@ final class Session implements Sink {
                         return;
                     }
                     o = queue.pollFirst();
-                    if (o.dead) {
-                        continue;
-                    }
                     if (o.key != null) {
                         conflate.remove(o.key);
                     }

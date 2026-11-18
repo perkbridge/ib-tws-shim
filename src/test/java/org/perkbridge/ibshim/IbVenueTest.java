@@ -27,11 +27,28 @@ class IbVenueTest {
     Server server;
     IbVenue venue;
     final ByteArrayOutputStream logs = new ByteArrayOutputStream();
+    java.net.ServerSocket gateway; // a listener standing in for the IB gateway port
+    int port;
+    final java.util.List<java.net.Socket> accepted = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
 
     @BeforeEach
     void start() throws Exception {
         EClientSocket.calls.clear();
         EClientSocket.execTime = null;
+        EClientSocket.mode = "";
+        gateway = new java.net.ServerSocket(0, 50, java.net.InetAddress.getLoopbackAddress());
+        port = gateway.getLocalPort();
+        Thread acc = new Thread(() -> {
+            try {
+                while (true) {
+                    accepted.add(gateway.accept());
+                }
+            } catch (java.io.IOException ignored) {
+                // closed
+            }
+        });
+        acc.setDaemon(true);
+        acc.start();
         EClientSocket.emptyPositions = false;
         sock = dir.resolve("ib.sock");
         ServerConfig cfg = new ServerConfig(sock);
@@ -46,8 +63,12 @@ class IbVenueTest {
     }
 
     @AfterEach
-    void stop() {
+    void stop() throws Exception {
         server.close();
+        gateway.close();
+        for (java.net.Socket x : accepted) {
+            x.close();
+        }
     }
 
     TestClient hello() throws Exception {
@@ -58,9 +79,14 @@ class IbVenueTest {
 
     @SuppressWarnings("unchecked")
     Map<String, Object> connect(TestClient c) throws Exception {
-        Map<String, Object> r = c.call("connect", "{\"host\":\"127.0.0.1\",\"port\":4002,\"client_id\":7}");
+        Map<String, Object> r = c.call("connect", "{\"host\":\"127.0.0.1\",\"port\":" + port + ",\"client_id\":7}");
         assertEquals(Boolean.TRUE, r.get("ok"), String.valueOf(r));
         return (Map<String, Object>) r.get("result");
+    }
+
+    Map<String, Object> modeConnect(TestClient c, String mode, int timeoutMs) throws Exception {
+        EClientSocket.mode = mode;
+        return c.call("connect", "{\"host\":\"127.0.0.1\",\"port\":" + port + ",\"client_id\":1,\"connect_timeout_ms\":" + timeoutMs + "}");
     }
 
     static String code(Map<String, Object> r) {
@@ -95,9 +121,9 @@ class IbVenueTest {
             assertEquals("2026-11-18T14:00:00Z", r.get("connection_time"));
             Map<String, Object> ev = c.waitEvent("connected", 3000);
             assertEquals(7L, ((Map<String, Object>) ev.get("data")).get("client_id"));
-            assertTrue(EClientSocket.calls.contains("eConnect 127.0.0.1 4002 7"));
+            assertTrue(EClientSocket.calls.contains("eConnect 127.0.0.1 " + port + " 7"));
             // a second connect is refused
-            Map<String, Object> again = c.call("connect", "{\"host\":\"127.0.0.1\",\"port\":4002,\"client_id\":7}");
+            Map<String, Object> again = c.call("connect", "{\"host\":\"127.0.0.1\",\"port\":" + port + ",\"client_id\":7}");
             assertEquals("already_connected", code(again));
         }
     }
@@ -105,7 +131,7 @@ class IbVenueTest {
     @Test
     void unknownFieldsAreIgnoredOutsideOrdersAsTheSpecSays() throws Exception {
         try (TestClient c = hello()) {
-            Map<String, Object> r = c.call("connect", "{\"host\":\"127.0.0.1\",\"port\":4002,\"client_id\":1,\"future_field\":1}");
+            Map<String, Object> r = c.call("connect", "{\"host\":\"127.0.0.1\",\"port\":" + port + ",\"client_id\":1,\"future_field\":1}");
             assertEquals(Boolean.TRUE, r.get("ok"), String.valueOf(r));
             assertEquals(Boolean.TRUE, c.call("req_ids", "{\"whatever\":true}").get("ok"));
         }
@@ -114,7 +140,7 @@ class IbVenueTest {
     @Test
     void connectFailureIsAVenueErrorWithIbsCode() throws Exception {
         try (TestClient c = hello()) {
-            Map<String, Object> r = c.call("connect", "{\"host\":\"refuse\",\"port\":4002,\"client_id\":1}");
+            Map<String, Object> r = modeConnect(c, "refuse", 10000);
             assertEquals("venue_error", code(r));
             assertEquals(502L, ((Map<?, ?>) r.get("error")).get("venue_code"));
             assertEquals("not_connected", code(c.call("req_ids", null)));
@@ -122,9 +148,44 @@ class IbVenueTest {
     }
 
     @Test
+    void anUnreachableGatewayPortIsAVenueErrorWith502() throws Exception {
+        int dead;
+        try (java.net.ServerSocket tmp = new java.net.ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress())) {
+            dead = tmp.getLocalPort();
+        }
+        try (TestClient c = hello()) {
+            Map<String, Object> r = c.call("connect", "{\"host\":\"127.0.0.1\",\"port\":" + dead + ",\"client_id\":1,\"connect_timeout_ms\":2000}");
+            assertEquals("venue_error", code(r));
+            assertEquals(502L, ((Map<?, ?>) r.get("error")).get("venue_code"));
+        }
+    }
+
+    @Test
+    void aHungHandshakeIsReleasedWhenTheClientGoesAway() throws Exception {
+        TestClient c = hello();
+        EClientSocket.mode = "hang";
+        c.send("connect", "{\"host\":\"127.0.0.1\",\"port\":" + port + ",\"client_id\":1,\"connect_timeout_ms\":60000}");
+        Thread.sleep(300);
+        c.close();
+        TestClient next = null;
+        for (int i = 0; i < 60 && next == null; i++) {
+            TestClient t = new TestClient(sock);
+            String l = t.next(300);
+            if (l != null && l.contains("busy")) {
+                t.close();
+                Thread.sleep(100);
+                continue;
+            }
+            next = t;
+        }
+        assertNotNull(next, "a blocked eConnect must not keep the client slot");
+        next.close();
+    }
+
+    @Test
     void connectTimesOutWhenTheGatewaySendsNoValidId() throws Exception {
         try (TestClient c = hello()) {
-            Map<String, Object> r = c.call("connect", "{\"host\":\"silent\",\"port\":4002,\"client_id\":1,\"connect_timeout_ms\":300}");
+            Map<String, Object> r = modeConnect(c, "silent", 300);
             assertEquals("timeout", code(r));
             assertEquals("not_connected", code(c.call("server_time", null)));
         }
@@ -372,7 +433,7 @@ class IbVenueTest {
     void aGatewayThatClosesDuringTheHandshakeFailsConnectAtOnceWithItsFirstError() throws Exception {
         try (TestClient c = hello()) {
             long t0 = System.nanoTime();
-            Map<String, Object> r = c.call("connect", "{\"host\":\"dropme\",\"port\":4002,\"client_id\":1,\"connect_timeout_ms\":20000}");
+            Map<String, Object> r = modeConnect(c, "dropme", 20000);
             assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0) < 3000, "must not wait out the timeout");
             assertEquals("venue_error", code(r));
             assertEquals(326L, ((Map<?, ?>) r.get("error")).get("venue_code"));
@@ -391,6 +452,36 @@ class IbVenueTest {
                 l = c.next(3000);
                 assertNotNull(l, "the session must end");
             } while (!TestClient.isEof(l));
+        }
+    }
+
+    @Test
+    void anIbDecodeFailureEndsTheSession() throws Exception {
+        try (TestClient c = hello()) {
+            connect(c);
+            EClientSocket cl = EClientSocket.last;
+            cl.post(() -> { throw new IllegalStateException("cannot decode message"); });
+            String l;
+            do {
+                l = c.next(3000);
+                assertNotNull(l, "the session must end");
+            } while (!TestClient.isEof(l));
+        }
+        for (int i = 0; i < 100 && !EClientSocket.calls.contains("eDisconnect"); i++) {
+            TimeUnit.MILLISECONDS.sleep(50);
+        }
+        assertTrue(EClientSocket.calls.contains("eDisconnect"));
+    }
+
+    @Test
+    void outOfRangeNumbersAreRefused() throws Exception {
+        try (TestClient c = hello()) {
+            connect(c);
+            String k = "\"contract\":{\"symbol\":\"ES\",\"sec_type\":\"FUT\",\"exchange\":\"CME\",\"currency\":\"USD\"}";
+            assertEquals("bad_request", code(c.call("place_order", "{\"order_id\":8," + k
+                    + ",\"order\":{\"action\":\"BUY\",\"order_type\":\"LMT\",\"total_quantity\":\"1\",\"lmt_price\":\"1e400\"}}")));
+            assertEquals("bad_request", code(c.call("place_order", "{\"order_id\":8,\"contract\":{\"symbol\":\"X\",\"strike\":\"1e999\"},"
+                    + "\"order\":{\"action\":\"BUY\",\"order_type\":\"MKT\",\"total_quantity\":\"1\"}}")));
         }
     }
 
@@ -457,7 +548,8 @@ class IbVenueTest {
     @Test
     void aWaitingConnectIsReleasedWhenTheClientGoesAway() throws Exception {
         TestClient c = hello();
-        c.send("connect", "{\"host\":\"silent\",\"port\":4002,\"client_id\":1,\"connect_timeout_ms\":60000}");
+        EClientSocket.mode = "silent";
+        c.send("connect", "{\"host\":\"127.0.0.1\",\"port\":" + port + ",\"client_id\":1,\"connect_timeout_ms\":60000}");
         Thread.sleep(300);
         c.close();
         // the shim must free its only client slot long before the 60 s connect timeout

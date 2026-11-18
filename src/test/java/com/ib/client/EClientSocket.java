@@ -23,8 +23,20 @@ public class EClientSocket {
 
     public EClientSocket(EWrapper w, EJavaSignal s) { wrapper = w; signal = s; last = this; }
 
+    /** Test hook: what the next connect does: "", "refuse", "silent", "dropme" or "hang". */
+    public static volatile String mode = "";
+
+    public void eConnect(java.net.Socket socket, int clientId) {
+        String m = mode;
+        if (m.equals("hang")) { // like IB's handshake: a blocking read on the socket
+            try { socket.getInputStream().read(); } catch (java.io.IOException e) { throw new RuntimeException(e); }
+        }
+        String host = m.isEmpty() ? "127.0.0.1" : m.equals("refuse") ? "refuse" : m.equals("silent") ? "silent" : m.equals("dropme") ? "dropme" : "127.0.0.1";
+        calls.add("eConnect " + socket.getInetAddress().getHostAddress() + " " + socket.getPort() + " " + clientId);
+        eConnect(host, socket.getPort(), clientId);
+    }
+
     public void eConnect(String host, int port, int clientId) {
-        calls.add("eConnect " + host + " " + port + " " + clientId);
         if (host.equals("refuse")) { wrapper.error(-1, 502, "Couldn't connect to TWS", ""); return; }
         connected = true;
         if (host.equals("silent")) { return; }

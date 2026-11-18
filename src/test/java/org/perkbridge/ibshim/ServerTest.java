@@ -226,7 +226,13 @@ class ServerTest {
         TestClient next = null;
         for (int i = 0; i < 50 && next == null; i++) {
             TestClient t = new TestClient(sock);
-            t.send("hello", "{\"protocol\":\"perkbridge.ibshim/v1\"}");
+            try {
+                t.send("hello", "{\"protocol\":\"perkbridge.ibshim/v1\"}");
+            } catch (java.io.IOException busyAndClosed) {
+                t.close();
+                Thread.sleep(50);
+                continue;
+            }
             String l = t.next(500);
             if (l != null && l.contains("\"ok\":true")) {
                 next = t;
@@ -412,6 +418,36 @@ class ServerTest {
     void bindLeavesNoTemporaryFilesBehind() throws Exception {
         try (var names = Files.list(dir)) {
             assertEquals(List.of("s.sock"), names.map(p -> p.getFileName().toString()).sorted().toList());
+        }
+    }
+
+    @Test
+    void numericIdsAreRefusedBecauseTheSpecSaysIdIsAString() throws Exception {
+        try (TestClient c = helloClient()) {
+            c.sendRaw("{\"id\":5,\"op\":\"ping\"}\n");
+            assertEquals("bad_request", ((Map<?, ?>) c.nextObj(3000).get("error")).get("code"));
+        }
+    }
+
+    @Test
+    void replacedTicksAreFreedSoTheQueueCapStillHolds() throws Exception {
+        server.close();
+        start(c -> c.maxQueueBytes = 1 << 20);
+        try (TestClient c = helloClient()) {
+            Sink s = venue.sink;
+            c.paused = true;
+            // one key, endless replacements, a stalled reader: memory and counted bytes stay bounded
+            for (int i = 0; i < 2_000_000; i++) {
+                Map<String, Object> d = new LinkedHashMap<>();
+                d.put("req_id", 1L);
+                d.put("tick_type", 4L);
+                d.put("price", String.valueOf(i));
+                if (s.event("tick_price", d) == 0) {
+                    break;
+                }
+            }
+            c.paused = false;
+            assertEquals(Boolean.TRUE, c.call("ping", null).get("ok"), "a single conflated key must not trip the cap");
         }
     }
 }
