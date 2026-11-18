@@ -15,6 +15,9 @@ public final class Main {
     public static final int EXIT_ARGS = 2;
     public static final int EXIT_API_JAR = 3;
     public static final int EXIT_SOCKET = 4;
+    public static final int EXIT_INTERNAL = 1;
+
+    private static volatile boolean failing;
 
     private Main() {}
 
@@ -65,7 +68,7 @@ public final class Main {
 
         Venue venue;
         try {
-            venue = VenueLoader.load(Path.of(apiJar), log);
+            venue = VenueLoader.load(apiJar, log);
         } catch (VenueLoader.ApiJarException e) {
             log.error("api_jar_unusable", "path", apiJar, "error", e.getMessage());
             return EXIT_API_JAR;
@@ -84,12 +87,20 @@ public final class Main {
             return EXIT_SOCKET;
         }
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            if (failing) {
+                return; // an error exit keeps its exit code
+            }
             log.info("shutdown", "signal", "SIGTERM");
             server.close();
             Runtime.getRuntime().halt(EXIT_OK); // SIGTERM is a clean stop: exit 0
         }, "ibshim-shutdown"));
         log.info("started", "shim", cfg.shimVersion, "api_jar", apiJar, "java", System.getProperty("java.version"));
         server.serve();
+        if (!server.closing()) {
+            failing = true;
+            log.error("serve_stopped", "error", "the accept loop ended without a stop request");
+            return EXIT_INTERNAL;
+        }
         return EXIT_OK;
     }
 }

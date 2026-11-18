@@ -30,20 +30,44 @@ final class VenueLoader {
 
     private VenueLoader() {}
 
-    static Venue load(Path apiJar, Log log) throws ApiJarException {
-        if (!Files.isRegularFile(apiJar) || !Files.isReadable(apiJar)) {
-            throw new ApiJarException("not a readable file", null);
-        }
-        URL shimJar;
+    /**
+     * @param apiJars the value of {@code --api-jar}: one path, or several separated by the
+     *     platform path separator (newer IB libraries need extra jars such as protobuf)
+     */
+    static Venue load(String apiJars, Log log) throws ApiJarException {
+        java.util.List<URL> urls = new java.util.ArrayList<>();
         try {
             CodeSource cs = VenueLoader.class.getProtectionDomain().getCodeSource();
-            shimJar = cs == null ? null : cs.getLocation();
-            URL[] urls = shimJar == null
-                    ? new URL[] {apiJar.toUri().toURL()}
-                    : new URL[] {shimJar, apiJar.toUri().toURL()};
+            if (cs != null && cs.getLocation() != null) {
+                urls.add(cs.getLocation());
+            }
+            int given = 0;
+            for (String p : apiJars.split(java.util.regex.Pattern.quote(java.io.File.pathSeparator))) {
+                if (p.isEmpty()) {
+                    continue;
+                }
+                Path jar = Path.of(p);
+                if (!Files.isRegularFile(jar) || !Files.isReadable(jar)) {
+                    throw new ApiJarException(p + ": not a readable file", null);
+                }
+                urls.add(jar.toUri().toURL());
+                given++;
+            }
+            if (given == 0) {
+                throw new ApiJarException("no API jar given", null);
+            }
             ClassLoader app = VenueLoader.class.getClassLoader();
-            AdapterLoader loader = new AdapterLoader(urls, app);
-            loader.loadClass(IB_PROBE_CLASS); // IB's client must be in the jar
+            AdapterLoader loader = new AdapterLoader(urls.toArray(new URL[0]), app);
+            // Link, not just find, the classes the adapter relies on: a missing dependency of
+            // IB's library (for example a protobuf class used in EWrapper) fails here, at
+            // start, with exit code 3, instead of at the first connect.
+            for (String n : new String[] {"com.ib.client.EClientSocket", "com.ib.client.EWrapper",
+                "com.ib.client.EReader", "com.ib.client.EJavaSignal", "com.ib.client.Contract",
+                "com.ib.client.Order", "com.ib.client.ExecutionFilter"}) {
+                Class<?> c = Class.forName(n, false, loader);
+                c.getMethods();
+                c.getConstructors();
+            }
             Class<?> c = Class.forName(VENUE_CLASS, true, loader);
             Object o = c.getDeclaredConstructor(Log.class).newInstance(log);
             return (Venue) o;

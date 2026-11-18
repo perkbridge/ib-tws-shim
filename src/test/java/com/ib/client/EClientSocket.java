@@ -15,6 +15,7 @@ public class EClientSocket {
     public static volatile Contract lastContract;
     public static volatile Order lastOrder;
     public static volatile ExecutionFilter lastFilter;
+    public static volatile String execTime;
     public final EWrapper wrapper;
     private final EJavaSignal signal;
     private final ConcurrentLinkedQueue<Runnable> q = new ConcurrentLinkedQueue<>();
@@ -27,6 +28,11 @@ public class EClientSocket {
         if (host.equals("refuse")) { wrapper.error(-1, 502, "Couldn't connect to TWS", ""); return; }
         connected = true;
         if (host.equals("silent")) { return; }
+        if (host.equals("dropme")) {
+            post(() -> wrapper.error(-1, 326, "Unable to connect as the client id is already in use", ""));
+            post(() -> { connected = false; wrapper.connectionClosed(); });
+            return;
+        }
         post(() -> wrapper.nextValidId(1000));
         post(() -> wrapper.managedAccounts("DU1,DU2"));
     }
@@ -55,14 +61,16 @@ public class EClientSocket {
     public void reqExecutions(int id, ExecutionFilter f) {
         calls.add("reqExecutions " + id); lastFilter = f;
         Contract c = new Contract(); c.symbol("AAPL"); c.conid(265598);
-        post(() -> wrapper.execDetails(id, c, new Execution()));
+        Execution ex = new Execution(); if (execTime != null) { ex.time = execTime; }
+        post(() -> wrapper.execDetails(id, c, ex));
         post(() -> wrapper.commissionReport(new CommissionReport()));
         post(() -> wrapper.execDetailsEnd(id));
     }
+    public static volatile boolean emptyPositions;
     public void reqPositions() {
         calls.add("reqPositions");
         Contract c = new Contract(); c.symbol("AAPL"); c.conid(265598);
-        post(() -> wrapper.position("DU1", c, Decimal.parse("10"), 187.25));
+        if (!emptyPositions) { post(() -> wrapper.position("DU1", c, Decimal.parse("10"), 187.25)); }
         post(wrapper::positionEnd);
     }
     public void cancelPositions() { calls.add("cancelPositions"); }

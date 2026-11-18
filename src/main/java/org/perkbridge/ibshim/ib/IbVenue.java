@@ -69,6 +69,12 @@ public final class IbVenue implements Venue {
         volatile String lastErrorMessage = "";
         volatile boolean userDisconnect;
         volatile boolean disconnectedSent;
+        volatile boolean dead; // torn down: its late callbacks must not reach any client
+        volatile boolean aborted; // the client went away while connect was waiting
+        volatile boolean connectedSent;
+        volatile boolean closedEarly; // the gateway closed before the handshake finished
+        volatile int firstErrorCode;
+        volatile String firstErrorMessage = "";
         volatile boolean positionsSnapshot;
         volatile long lastPositionSeq;
         final Map<Long, long[]> accountSummary = new ConcurrentHashMap<>(); // req_id -> {snapshot, lastSeq}
@@ -97,13 +103,17 @@ public final class IbVenue implements Venue {
         if (v != null && !v.isEmpty()) {
             return v;
         }
-        try {
-            Object cv = c.getField("CLIENT_VERSION").get(null);
-            if (cv != null) {
-                return "client_version=" + cv;
+        for (Class<?> k = c; k != null; k = k.getSuperclass()) {
+            try {
+                java.lang.reflect.Field f = k.getDeclaredField("CLIENT_VERSION");
+                f.setAccessible(true);
+                Object cv = f.get(null);
+                if (cv != null) {
+                    return "client_version=" + cv;
+                }
+            } catch (ReflectiveOperationException | RuntimeException ignored) {
+                // look one level up
             }
-        } catch (ReflectiveOperationException ignored) {
-            // no constant offered
         }
         return "unknown";
     }
@@ -133,26 +143,35 @@ public final class IbVenue implements Venue {
     }
 
     @Override
-    public synchronized void detach() {
-        Sink s = sink;
-        sink = null;
-        teardown(false);
-        logDropped("detach");
-        if (s != null) {
-            log.debug("venue_detached");
+    public void detach() {
+        // a connect that is still waiting holds the monitor: wake it first
+        Conn pending = conn;
+        if (pending != null) {
+            pending.aborted = true;
+            pending.nextId.countDown();
+            pending.accounts.countDown();
+        }
+        synchronized (this) {
+            Sink s = sink;
+            sink = null;
+            teardown(false);
+            logDropped("detach");
+            if (s != null) {
+                log.debug("venue_detached");
+            }
         }
     }
 
-    private void emit(String name, Map<String, Object> data) {
-        Sink s = sink;
-        if (s != null) {
-            s.event(name, data);
+    private void emitC(Conn c, String name, Map<String, Object> data) {
+        Sink sk = sink;
+        if (sk != null && c != null && !c.dead) {
+            sk.event(name, data);
         }
     }
 
-    private long emitSeq(String name, Map<String, Object> data) {
-        Sink s = sink;
-        return s == null ? 0 : s.event(name, data);
+    private long emitSeqC(Conn c, String name, Map<String, Object> data) {
+        Sink sk = sink;
+        return sk == null || c == null || c.dead ? 0 : sk.event(name, data);
     }
 
     // ---------------------------------------------------------------- ops
@@ -167,6 +186,9 @@ public final class IbVenue implements Venue {
                     "the loaded IB client library does not offer what " + op + " needs: " + e.getMessage());
         } catch (IllegalArgumentException e) {
             throw new OpException(OpException.BAD_REQUEST, e.getMessage());
+        } catch (LinkageError e) {
+            log.error("api_incomplete", "op", op, "error", e.toString());
+            throw new OpException(OpException.VENUE_ERROR, "the IB client library is incomplete: " + e.getMessage());
         } catch (IllegalStateException e) {
             log.error("api_call_failed", "op", op, "error", String.valueOf(e.getCause() == null ? e : e.getCause()));
             throw new OpException(OpException.VENUE_ERROR, "the IB client rejected " + op + ": "
@@ -222,6 +244,7 @@ public final class IbVenue implements Venue {
                 return empty();
             case "positions":
                 conn0().positionsSnapshot = true;
+                conn0().lastPositionSeq = 0;
                 call("reqPositions");
                 return empty();
             case "cancel_positions":
@@ -352,11 +375,25 @@ public final class IbVenue implements Venue {
         readerThread.start();
 
         try {
-            if (!c.nextId.await(Math.max(1, remainingMs(deadline)), TimeUnit.MILLISECONDS)) {
-                int code = c.lastErrorCode;
+            boolean got = c.nextId.await(Math.max(1, remainingMs(deadline)), TimeUnit.MILLISECONDS);
+            if (c.aborted) {
+                teardown(false);
+                throw new OpException(OpException.NOT_CONNECTED, "the client went away while connecting");
+            }
+            if (c.closedEarly) {
+                int code = c.firstErrorCode;
+                String msg = c.firstErrorMessage;
+                teardown(false);
+                throw new OpException(OpException.VENUE_ERROR,
+                        "the gateway closed the connection during the handshake" + (msg.isEmpty() ? "" : ": " + msg), code);
+            }
+            if (!got) {
+                int code = c.firstErrorCode;
+                String msg = c.firstErrorMessage;
                 teardown(false);
                 throw new OpException(OpException.TIMEOUT,
-                        "the gateway accepted the socket but sent no next valid id within " + timeoutMs + " ms", code);
+                        "the gateway accepted the socket but sent no next valid id within " + timeoutMs + " ms"
+                                + (msg.isEmpty() ? "" : " (" + msg + ")"), code);
             }
             c.accounts.await(Math.min(2000, Math.max(1, remainingMs(deadline))), TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
@@ -369,14 +406,23 @@ public final class IbVenue implements Venue {
         r.put("server_version", sv instanceof Number n ? n.longValue() : 0L);
         String ct = String.valueOf(Reflect.call(client, "getTwsConnectionTime"));
         String ctNorm = Times.toRfc3339(ct);
-        r.put("connection_time", ctNorm != null ? ctNorm : ct);
+        if (ctNorm != null) {
+            r.put("connection_time", ctNorm);
+        } else {
+            r.put("connection_time_raw", ct); // the normalised field is omitted when the zone is unknown
+        }
         r.put("next_valid_id", c.nextValidId);
         r.put("accounts", new ArrayList<>(c.accountList));
         Map<String, Object> ev = new LinkedHashMap<>();
         ev.put("server_version", r.get("server_version"));
-        ev.put("connection_time", r.get("connection_time"));
+        if (ctNorm != null) {
+            ev.put("connection_time", ctNorm);
+        } else {
+            ev.put("connection_time_raw", ct);
+        }
         ev.put("client_id", (long) clientId);
-        emit("connected", ev);
+        c.connectedSent = true;
+        emitC(c, "connected", ev);
         log.info("gateway_connected", "host", host, "port", port, "client_id", clientId);
         return r;
     }
@@ -386,6 +432,7 @@ public final class IbVenue implements Venue {
     }
 
     private void readerLoop(Object cl0, Object sig0, Object rd0, Conn c) {
+        String failure = null;
         try {
             while (Boolean.TRUE.equals(safeIsConnected(cl0))) {
                 Reflect.call(sig0, "waitForSignal");
@@ -396,22 +443,34 @@ public final class IbVenue implements Venue {
                     onCallback(c, "error", new Object[] {new IllegalStateException(e.toString())});
                 }
             }
-        } catch (RuntimeException e) {
-            log.warn("ib_reader_stopped", "error", e.toString());
+        } catch (Throwable t) { // a LinkageError must not end this thread silently
+            if (!(t instanceof RuntimeException re && re.getCause() instanceof InterruptedException)) {
+                failure = t.toString();
+                log.error("ib_reader_failed", "error", failure);
+            }
         }
-        // the socket is gone: tell the client once, unless it asked for this
-        if (!c.userDisconnect && conn == c) {
+        if (c.userDisconnect || c.dead || conn != c) {
+            return;
+        }
+        if (!c.connectedSent) {
+            // the gateway closed during the handshake: wake connect, which answers with an error
+            c.closedEarly = true;
+            c.nextId.countDown();
+            c.accounts.countDown();
+        } else if (failure != null) {
+            connectionClosed(c, "error", failure);
+        } else {
             connectionClosed(c, "gateway_closed", "gateway socket closed");
         }
     }
 
     /** Disconnects from the gateway and drops per-connection state. */
     private void teardown(boolean emitRequested) {
-        Object c = client;
+        Object cl0 = client;
         Conn conn0 = conn;
-        if (c != null) {
+        if (cl0 != null) {
             try {
-                Reflect.call(c, "eDisconnect");
+                Reflect.call(cl0, "eDisconnect");
             } catch (RuntimeException e) {
                 log.debug("disconnect_failed", "error", e.toString());
             }
@@ -420,11 +479,21 @@ public final class IbVenue implements Venue {
             conn0.disconnectedSent = true;
             Map<String, Object> d = new LinkedHashMap<>();
             d.put("reason", "requested");
-            emit("disconnected", d);
+            emitC(conn0, "disconnected", d);
+        }
+        if (conn0 != null) {
+            conn0.dead = true; // late callbacks of this connection go nowhere
         }
         Thread t = readerThread;
         if (t != null) {
             t.interrupt();
+            if (t != Thread.currentThread()) {
+                try {
+                    t.join(500); // a late callback must not reach the next connection or client
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
         }
         client = null;
         signal = null;
@@ -437,8 +506,8 @@ public final class IbVenue implements Venue {
     }
 
     private void connectionClosed(Conn c, String reason, String message) {
-        if (c.disconnectedSent) {
-            return;
+        if (c.disconnectedSent || !c.connectedSent) {
+            return; // never report a disconnect for a connection that was not announced
         }
         c.disconnectedSent = true;
         connected = false;
@@ -447,7 +516,7 @@ public final class IbVenue implements Venue {
         if (message != null && !message.isEmpty()) {
             d.put("message", message);
         }
-        emit("disconnected", d);
+        emitC(c, "disconnected", d);
         logDropped("disconnected");
     }
 
@@ -470,6 +539,7 @@ public final class IbVenue implements Venue {
         if (!ORDER_TYPES.contains(type)) {
             throw new IllegalArgumentException("order.order_type must be one of " + new java.util.TreeSet<>(ORDER_TYPES));
         }
+        checkOrderTypes(o);
         decimal(o, "total_quantity", true, true);
         if ((type.equals("LMT") || type.equals("STP LMT")) && !o.containsKey("lmt_price")) {
             throw new IllegalArgumentException("order.lmt_price is required for " + type);
@@ -477,8 +547,8 @@ public final class IbVenue implements Venue {
         if ((type.equals("STP") || type.equals("STP LMT")) && !o.containsKey("aux_price")) {
             throw new IllegalArgumentException("order.aux_price (the stop price) is required for " + type);
         }
-        decimal(o, "lmt_price", false, false);
-        decimal(o, "aux_price", false, false);
+        decimalAny(o, "lmt_price"); // spreads and some futures trade at negative prices
+        decimalAny(o, "aux_price");
         if (o.containsKey("tif")) {
             String tif = reqStr(o, "tif");
             if (!TIFS.contains(tif)) {
@@ -532,7 +602,20 @@ public final class IbVenue implements Venue {
         if (f == null) {
             return ef;
         }
-        Map<String, Object> g = new LinkedHashMap<>(f);
+        Map<String, Object> g = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> e : f.entrySet()) {
+            if (e.getValue() != null) {
+                g.put(e.getKey(), e.getValue());
+            }
+        }
+        for (String k : new String[] {"account", "time", "symbol", "sec_type", "exchange", "side"}) {
+            if (g.containsKey(k) && !(g.get(k) instanceof String)) {
+                throw new IllegalArgumentException("filter." + k + " must be a string");
+            }
+        }
+        if (g.containsKey("client_id")) {
+            intIn(g, "client_id", 0, Integer.MAX_VALUE);
+        }
         if (g.containsKey("time") && !str0(g, "time").isEmpty()) {
             g.put("time", Times.toIb(str0(g, "time")));
         }
@@ -581,8 +664,14 @@ public final class IbVenue implements Venue {
             }
             try {
                 onCallback(c, method.getName(), ar);
-            } catch (RuntimeException e) {
+            } catch (RuntimeException | LinkageError e) {
+                // an event we cannot translate would be lost silently: end the client session so
+                // the client reconnects and reconciles instead of trusting a stream with a hole
                 log.error("callback_failed", "callback", method.getName(), "error", e.toString());
+                Sink sk = sink;
+                if (sk != null && !c.dead) {
+                    sk.abort("callback_failed:" + method.getName());
+                }
             }
             return defaultValue(method);
         };
@@ -620,7 +709,7 @@ public final class IbVenue implements Venue {
                 c.nextValidId = num(ar[0]);
                 c.nextId.countDown();
                 d.put("order_id", num(ar[0]));
-                emit("next_valid_id", d);
+                emitC(c, "next_valid_id", d);
             }
             case "managedAccounts" -> {
                 List<Object> accts = new ArrayList<>();
@@ -632,12 +721,12 @@ public final class IbVenue implements Venue {
                 c.accountList = accts;
                 c.accounts.countDown();
                 d.put("accounts", accts);
-                emit("managed_accounts", d);
+                emitC(c, "managed_accounts", d);
             }
             case "currentTime" -> {
                 d.put("time", Times.epochToRfc3339(num(ar[0])));
                 d.put("epoch", num(ar[0]));
-                emit("current_time", d);
+                emitC(c, "current_time", d);
             }
             case "connectionClosed" -> {
                 if (!c.userDisconnect) {
@@ -650,21 +739,21 @@ public final class IbVenue implements Venue {
                 d.put("contract", Mapper.out(ar[1], Mapper.CONTRACT));
                 d.put("order", Mapper.out(ar[2], Mapper.ORDER));
                 d.put("order_state", Mapper.out(ar[3], Mapper.ORDER_STATE));
-                emit("open_order", d);
+                emitC(c, "open_order", d);
             }
-            case "openOrderEnd" -> emit("open_order_end", d);
+            case "openOrderEnd" -> emitC(c, "open_order_end", d);
             case "completedOrder" -> {
                 d.put("contract", Mapper.out(ar[0], Mapper.CONTRACT));
                 d.put("order", Mapper.out(ar[1], Mapper.ORDER));
                 d.put("order_state", Mapper.out(ar[2], Mapper.ORDER_STATE));
-                emit("completed_order", d);
+                emitC(c, "completed_order", d);
             }
-            case "completedOrdersEnd" -> emit("completed_orders_end", d);
+            case "completedOrdersEnd" -> emitC(c, "completed_orders_end", d);
             case "orderStatus" -> {
                 d.put("order_id", num(ar[0]));
                 d.put("status", s(ar[1]));
-                d.put("filled", Mapper.decimalString(ar[2]));
-                d.put("remaining", Mapper.decimalString(ar[3]));
+                putDec(d, "filled", ar[2]);
+                putDec(d, "remaining", ar[3]);
                 putDec(d, "avg_fill_price", ar[4]);
                 d.put("perm_id", num(ar[5]));
                 d.put("parent_id", num(ar[6]));
@@ -674,7 +763,7 @@ public final class IbVenue implements Venue {
                     d.put("why_held", s(ar[9]));
                 }
                 putDec(d, "mkt_cap_price", ar[10]);
-                emit("order_status", d);
+                emitC(c, "order_status", d);
             }
             case "execDetails" -> {
                 d.put("req_id", num(ar[0]));
@@ -689,30 +778,31 @@ public final class IbVenue implements Venue {
                     ex.put("time_raw", raw);
                 }
                 d.put("execution", ex);
-                emit("exec_details", d);
+                emitC(c, "exec_details", d);
             }
             case "execDetailsEnd" -> {
                 d.put("req_id", num(ar[0]));
-                emit("exec_details_end", d);
+                emitC(c, "exec_details_end", d);
             }
             case "commissionReport", "commissionAndFeesReport" -> {
-                emit("commission_report", Mapper.out(ar[0], Mapper.COMMISSION));
+                emitC(c, "commission_report", Mapper.out(ar[0], Mapper.COMMISSION));
             }
             case "position" -> {
                 d.put("account", s(ar[0]));
                 d.put("contract", Mapper.out(ar[1], Mapper.CONTRACT));
-                d.put("position", Mapper.decimalString(ar[2]));
+                putDec(d, "position", ar[2]);
                 putDec(d, "avg_cost", ar[3]);
                 d.put("snapshot", c.positionsSnapshot);
-                long sq = emitSeq("position", d);
+                long sq = emitSeqC(c, "position", d);
                 if (c.positionsSnapshot) {
                     c.lastPositionSeq = sq;
                 }
             }
             case "positionEnd" -> {
-                d.put("as_of_seq", c.lastPositionSeq);
+                Sink sk = sink;
+                d.put("as_of_seq", c.lastPositionSeq != 0 ? c.lastPositionSeq : (sk == null ? 0L : sk.lastSeq()));
                 c.positionsSnapshot = false;
-                emit("position_end", d);
+                emitC(c, "position_end", d);
             }
             case "accountSummary" -> {
                 long id = num(ar[0]);
@@ -726,7 +816,7 @@ public final class IbVenue implements Venue {
                 }
                 boolean snap = st != null && st[0] == 1;
                 d.put("snapshot", snap);
-                long sq = emitSeq("account_summary", d);
+                long sq = emitSeqC(c, "account_summary", d);
                 if (snap) {
                     st[1] = sq;
                 }
@@ -735,48 +825,49 @@ public final class IbVenue implements Venue {
                 long id = num(ar[0]);
                 long[] st = c.accountSummary.get(id);
                 d.put("req_id", id);
-                d.put("as_of_seq", st == null ? 0L : st[1]);
+                Sink sk = sink;
+                d.put("as_of_seq", st != null && st[1] != 0 ? st[1] : (sk == null ? 0L : sk.lastSeq()));
                 if (st != null) {
                     st[0] = 0;
                 }
-                emit("account_summary_end", d);
+                emitC(c, "account_summary_end", d);
             }
             case "updateAccountValue" -> {
                 d.put("key", s(ar[0]));
                 d.put("value", s(ar[1]));
                 d.put("currency", s(ar[2]));
                 d.put("account", s(ar[3]));
-                emit("account_value", d);
+                emitC(c, "account_value", d);
             }
             case "updatePortfolio" -> {
                 d.put("contract", Mapper.out(ar[0], Mapper.CONTRACT));
-                d.put("position", Mapper.decimalString(ar[1]));
+                putDec(d, "position", ar[1]);
                 putDec(d, "market_price", ar[2]);
                 putDec(d, "market_value", ar[3]);
                 putDec(d, "average_cost", ar[4]);
                 putDec(d, "unrealized_pnl", ar[5]);
                 putDec(d, "realized_pnl", ar[6]);
                 d.put("account", s(ar[7]));
-                emit("portfolio", d);
+                emitC(c, "portfolio", d);
             }
             case "updateAccountTime" -> {
                 d.put("time_raw", s(ar[0]));
-                emit("account_time", d);
+                emitC(c, "account_time", d);
             }
             case "accountDownloadEnd" -> {
                 d.put("account", s(ar[0]));
-                emit("account_download_end", d);
+                emitC(c, "account_download_end", d);
             }
             case "contractDetails" -> {
                 Map<String, Object> m = new LinkedHashMap<>();
                 m.put("req_id", num(ar[0]));
                 m.put("contract", Mapper.out(Reflect.get(ar[1], "contract"), Mapper.CONTRACT));
                 m.putAll(Mapper.out(ar[1], Mapper.CONTRACT_DETAILS));
-                emit("contract_details", m);
+                emitC(c, "contract_details", m);
             }
             case "contractDetailsEnd" -> {
                 d.put("req_id", num(ar[0]));
-                emit("contract_details_end", d);
+                emitC(c, "contract_details_end", d);
             }
             case "marketRule" -> {
                 d.put("market_rule_id", num(ar[0]));
@@ -790,7 +881,7 @@ public final class IbVenue implements Venue {
                     }
                 }
                 d.put("increments", inc);
-                emit("market_rule", d);
+                emitC(c, "market_rule", d);
             }
             case "historicalData", "historicalDataUpdate" -> {
                 d.put("req_id", num(ar[0]));
@@ -802,13 +893,13 @@ public final class IbVenue implements Venue {
                 d.put("time_raw", raw);
                 d.putAll(Mapper.out(ar[1], Mapper.BAR));
                 d.put("update", name.equals("historicalDataUpdate"));
-                emit("historical_bar", d);
+                emitC(c, "historical_bar", d);
             }
             case "historicalDataEnd" -> {
                 d.put("req_id", num(ar[0]));
                 d.put("start_raw", s(ar[1]));
                 d.put("end_raw", s(ar[2]));
-                emit("historical_data_end", d);
+                emitC(c, "historical_data_end", d);
             }
             case "pnlSingle" -> {
                 d.put("req_id", num(ar[0]));
@@ -817,7 +908,7 @@ public final class IbVenue implements Venue {
                 putDec(d, "unrealized_pnl", ar[3]);
                 putDec(d, "realized_pnl", ar[4]);
                 putDec(d, "value", ar[5]);
-                emit("pnl_single", d);
+                emitC(c, "pnl_single", d);
             }
             case "tickPrice" -> {
                 d.put("req_id", num(ar[0]));
@@ -831,29 +922,29 @@ public final class IbVenue implements Venue {
                     }
                 }
                 d.put("attrib", at);
-                emit("tick_price", d);
+                emitC(c, "tick_price", d);
             }
             case "tickSize" -> {
                 d.put("req_id", num(ar[0]));
                 d.put("tick_type", num(ar[1]));
-                d.put("size", Mapper.decimalString(ar[2]));
-                emit("tick_size", d);
+                putDec(d, "size", ar[2]);
+                emitC(c, "tick_size", d);
             }
             case "tickString" -> {
                 d.put("req_id", num(ar[0]));
                 d.put("tick_type", num(ar[1]));
                 d.put("value", s(ar[2]));
-                emit("tick_string", d);
+                emitC(c, "tick_string", d);
             }
             case "tickGeneric" -> {
                 d.put("req_id", num(ar[0]));
                 d.put("tick_type", num(ar[1]));
                 d.put("value", Mapper.decimalString(ar[2]));
-                emit("tick_generic", d);
+                emitC(c, "tick_generic", d);
             }
             case "tickSnapshotEnd" -> {
                 d.put("req_id", num(ar[0]));
-                emit("tick_snapshot_end", d);
+                emitC(c, "tick_snapshot_end", d);
             }
             default -> dropped.computeIfAbsent(name, k -> new AtomicLong()).incrementAndGet();
         }
@@ -883,6 +974,10 @@ public final class IbVenue implements Venue {
         }
         c.lastErrorCode = code;
         c.lastErrorMessage = msg;
+        if (c.firstErrorCode == 0 && code > 0 && severity(code).equals("error")) {
+            c.firstErrorCode = code;
+            c.firstErrorMessage = msg;
+        }
         d.put("req_id", id);
         d.put("order_id", id);
         d.put("code", (long) code);
@@ -891,7 +986,7 @@ public final class IbVenue implements Venue {
         if (!adv.isEmpty()) {
             d.put("advanced_order_reject", adv);
         }
-        emit("error", d);
+        emitC(c, "error", d);
         String state = switch (code) {
             case 1100 -> "lost";
             case 1101 -> "restored_orders_lost";
@@ -901,7 +996,7 @@ public final class IbVenue implements Venue {
         if (state != null) {
             Map<String, Object> cd = new LinkedHashMap<>();
             cd.put("state", state);
-            emit("connectivity", cd);
+            emitC(c, "connectivity", cd);
         }
     }
 
@@ -1002,6 +1097,43 @@ public final class IbVenue implements Venue {
 
     private static long reqId(Map<String, Object> m) {
         return intIn(m, "req_id", 0, Integer.MAX_VALUE);
+    }
+
+    private static void checkOrderTypes(Map<String, Object> o) {
+        for (String k : new String[] {"action", "order_type", "tif", "order_ref", "account", "oca_group", "good_till_date"}) {
+            if (o.get(k) != null && !(o.get(k) instanceof String)) {
+                throw new IllegalArgumentException("order." + k + " must be a string");
+            }
+        }
+        for (String k : new String[] {"transmit", "outside_rth", "what_if"}) {
+            if (o.get(k) != null && !(o.get(k) instanceof Boolean)) {
+                throw new IllegalArgumentException("order." + k + " must be a boolean");
+            }
+        }
+        if (o.get("parent_id") != null) {
+            intIn(o, "parent_id", 0, Integer.MAX_VALUE);
+        }
+        for (String k : new String[] {"total_quantity", "lmt_price", "aux_price"}) {
+            if (o.get(k) != null && !(o.get(k) instanceof String)) {
+                throw new IllegalArgumentException("order." + k + " must be a decimal string");
+            }
+        }
+    }
+
+    /** A decimal string of either sign. */
+    private static void decimalAny(Map<String, Object> m, String key) {
+        Object v = m.get(key);
+        if (v == null) {
+            return;
+        }
+        if (!(v instanceof String s)) {
+            throw new IllegalArgumentException(key + " must be a decimal string");
+        }
+        try {
+            new BigDecimal(s);
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(key + " is not a decimal: " + s);
+        }
     }
 
     /** Validates a decimal string (the wire carries money and quantities as strings). */

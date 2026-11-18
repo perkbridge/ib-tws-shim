@@ -23,5 +23,7 @@ public interface EWrapper {
     void positionEnd();
     void tickPrice(int tickerId, int field, double price, TickAttrib attribs);
     void tickSize(int tickerId, int field, Decimal size);
+    /** Simulates a library version whose callback has a different arity than the adapter expects. */
+    void orderStatus(int orderId, String status);
     void displayGroupList(int reqId, String groups); // a callback the adapter does not forward
 }

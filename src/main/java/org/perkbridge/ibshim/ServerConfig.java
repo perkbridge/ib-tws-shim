@@ -10,6 +10,7 @@ public final class ServerConfig {
     public int maxLineBytes = 1 << 20;
     public long maxQueueBytes = 64L << 20;
     public long heartbeatMillis = 5000;
+    public long helloTimeoutMillis = 30_000;
 
     public ServerConfig(Path socketPath) {
         this.socketPath = socketPath;

@@ -45,6 +45,11 @@ public final class Server implements AutoCloseable {
     private ServerSocketChannel server;
     private volatile boolean closing;
 
+    /** True once {@link #close()} was called (a stop was requested). */
+    public boolean closing() {
+        return closing;
+    }
+
     public Server(ServerConfig cfg, Venue venue, Log log) {
         this.cfg = cfg;
         this.venue = venue;
@@ -75,9 +80,28 @@ public final class Server implements AutoCloseable {
                 }
                 Files.deleteIfExists(p);
             }
-            server = ServerSocketChannel.open(StandardProtocolFamily.UNIX);
-            server.bind(UnixDomainSocketAddress.of(p));
-            Files.setPosixFilePermissions(p, PosixFilePermissions.fromString("rw-rw----"));
+            // The socket is created inside a private 0700 directory, given mode 0660 and then
+            // renamed into place, so nobody can connect while its mode still follows the umask.
+            Path tmpDir = Files.createTempDirectory(dir, ".ibshim-",
+                    java.nio.file.attribute.PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
+            Path tmp = tmpDir.resolve("s");
+            try {
+                server = ServerSocketChannel.open(StandardProtocolFamily.UNIX);
+                server.bind(UnixDomainSocketAddress.of(tmp));
+                Files.setPosixFilePermissions(tmp, PosixFilePermissions.fromString("rw-rw----"));
+                Files.move(tmp, p, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            } finally {
+                Files.deleteIfExists(tmp);
+                Files.deleteIfExists(tmpDir);
+            }
+            try {
+                if (Files.getPosixFilePermissions(dir).contains(java.nio.file.attribute.PosixFilePermission.OTHERS_EXECUTE)
+                        || Files.getPosixFilePermissions(dir).contains(java.nio.file.attribute.PosixFilePermission.OTHERS_WRITE)) {
+                    log.warn("socket_dir_world_accessible", "dir", dir.toString());
+                }
+            } catch (UnsupportedOperationException | IOException ignored) {
+                // no POSIX view: nothing to check
+            }
         } catch (IOException | RuntimeException e) {
             if (server != null) {
                 try {
@@ -98,7 +122,8 @@ public final class Server implements AutoCloseable {
                 Session s = active.get();
                 if (s != null && !s.finished()) {
                     try {
-                        s.heartbeat();
+                        s.expireIfNoHello();
+                    s.heartbeat();
                     } catch (RuntimeException e) {
                         log.error("heartbeat_failed", "error", e.toString());
                     }

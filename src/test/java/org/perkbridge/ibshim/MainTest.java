@@ -32,11 +32,11 @@ class MainTest {
     Path fakeApiJar() throws IOException {
         Path jar = dir.resolve("TwsApi.jar");
         try (JarOutputStream out = new JarOutputStream(Files.newOutputStream(jar))) {
-            for (String n : FAKE_CLASSES) {
-                String res = "com/ib/client/" + n + ".class";
-                try (InputStream in = MainTest.class.getClassLoader().getResourceAsStream(res)) {
-                    out.putNextEntry(new JarEntry(res));
-                    in.transferTo(out);
+            Path classesDir = Path.of(java.net.URLDecoder.decode(MainTest.class.getClassLoader().getResource("com/ib/client/EClientSocket.class").getPath(), java.nio.charset.StandardCharsets.UTF_8)).getParent();
+            try (var files = Files.list(classesDir)) {
+                for (Path f : (Iterable<Path>) files.filter(x -> x.toString().endsWith(".class"))::iterator) {
+                    out.putNextEntry(new JarEntry("com/ib/client/" + f.getFileName()));
+                    Files.copy(f, out);
                     out.closeEntry();
                 }
             }
@@ -67,6 +67,13 @@ class MainTest {
             out.write(1);
         }
         assertEquals(Main.EXIT_API_JAR, run("--socket", dir.resolve("s").toString(), "--api-jar", empty.toString()));
+    }
+
+    @Test
+    void aMissingSecondJarOfAClassPathStyleValueExitsWith3() throws Exception {
+        Path jar = fakeApiJar();
+        String both = jar + java.io.File.pathSeparator + dir.resolve("protobuf.jar");
+        assertEquals(Main.EXIT_API_JAR, run("--socket", dir.resolve("s").toString(), "--api-jar", both));
     }
 
     @Test

@@ -145,6 +145,15 @@ final class Mapper {
         if (v instanceof Long l) {
             return l == Long.MAX_VALUE;
         }
+        if (v.getClass().getName().equals("com.ib.client.Decimal")) {
+            try {
+                if (Boolean.FALSE.equals(Reflect.call(v, "isValid"))) {
+                    return true;
+                }
+            } catch (Reflect.MissingMemberException ignored) {
+                // no isValid in this library version: fall back to the text
+            }
+        }
         String s = v.toString();
         return s.isEmpty() || s.equals(DOUBLE_UNSET) || s.equals("Infinity") || s.equals("NaN")
                 || s.startsWith("1701411834604692317");
@@ -206,7 +215,8 @@ final class Mapper {
                     }
                 }
                 case INT -> {
-                    if (v instanceof Number n) {
+                    Object num = v instanceof Number ? v : Reflect.get(v, "val"); // IB wraps some ints in enum-like classes
+                    if (num instanceof Number n) {
                         m.put(row.json(), n.longValue());
                     }
                 }

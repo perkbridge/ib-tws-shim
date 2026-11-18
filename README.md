@@ -42,10 +42,12 @@ java -Xmx256m -jar ib-tws-shim.jar --socket /run/ibshim/ibshim.sock \
 | Option | Meaning |
 |--------|---------|
 | `--socket` | unix socket path; created with mode 0660; start with `umask 0007` and a setgid directory for the group |
-| `--api-jar` | path of IB's `TwsApi.jar` |
+| `--api-jar` | path of IB's `TwsApi.jar`; several jars may be given separated by `:` (newer IB libraries need extra jars, for example protobuf) |
 | `--log-level` | `debug`, `info`, `warn` or `error` (default `info`) |
 
-Exit codes: `0` stopped by SIGTERM, `2` bad arguments, `3` API jar missing or unusable,
+The API jars are linked at start: a missing class of IB's library exits with code 3 instead of failing at the first `connect`.
+
+Exit codes: `0` stopped by SIGTERM, `1` the accept loop ended unexpectedly, `2` bad arguments, `3` API jar missing or unusable,
 `4` socket path unusable. Logs are one JSON object per line on stderr. At `info` no
 message payloads are logged.
 

@@ -36,6 +36,7 @@ final class Session implements Sink {
     private static final class Out {
         byte[] bytes;
         final String key;
+        boolean dead; // replaced by a newer conflatable event; skipped by the writer
 
         Out(byte[] bytes, String key) {
             this.bytes = bytes;
@@ -57,7 +58,14 @@ final class Session implements Sink {
     private boolean closeAfterFlush;
     private String closeReason = "";
     private volatile boolean done;
-    private boolean helloSeen;
+    private volatile boolean helloSeen;
+    private final java.util.concurrent.ExecutorService ops =
+            java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "ibshim-ops");
+                t.setDaemon(true);
+                return t;
+            });
+    private final long startedNanos = System.nanoTime();
 
     Session(SocketChannel ch, Venue venue, AtomicLong seq, Log log, ServerConfig cfg) {
         this.ch = ch;
@@ -81,7 +89,7 @@ final class Session implements Sink {
             readLoop();
         } catch (IOException e) {
             close("read_failed: " + e.getClass().getSimpleName());
-        } catch (RuntimeException e) {
+        } catch (RuntimeException | LinkageError e) {
             log.error("session_failed", "error", e.toString());
             close("internal_error");
         } finally {
@@ -97,15 +105,19 @@ final class Session implements Sink {
                 Thread.currentThread().interrupt();
             }
             close("client_closed");
+            ops.shutdownNow();
             try {
                 writer.join(2000);
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
             }
             try {
-                venue.detach();
+                venue.detach(); // also wakes a connect that is still waiting
+                ops.awaitTermination(3, java.util.concurrent.TimeUnit.SECONDS);
             } catch (RuntimeException e) {
                 log.error("detach_failed", "error", e.toString());
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
             }
             String reason;
             synchronized (lock) {
@@ -197,12 +209,27 @@ final class Session implements Sink {
             sendError(id, OpException.BAD_REQUEST, "args must be an object");
             return true;
         }
+        // Ops run one at a time on their own thread, so a slow op such as connect never stops this
+        // thread from noticing that the client has gone away (which aborts the op).
+        final Object fid = id;
+        final String fop = op;
+        final Map<String, Object> fargs = args;
+        try {
+            ops.execute(() -> process(fid, fop, fargs));
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            return false; // session is ending
+        }
+        return true;
+    }
+
+    /** Runs on the ops thread. */
+    private void process(Object id, String op, Map<String, Object> args) {
         if (log.enabled(Log.Level.DEBUG)) {
             log.debug("request", "op", op, "id", String.valueOf(id));
         }
         if (!helloSeen && !op.equals("hello")) {
             sendError(id, OpException.BAD_REQUEST, "the first request must be hello");
-            return true;
+            return;
         }
         try {
             Map<String, Object> result;
@@ -213,7 +240,7 @@ final class Session implements Sink {
                         sendError(id, OpException.UNSUPPORTED_OP,
                                 "protocol " + p + " not supported; this shim speaks " + PROTOCOL_PREFIX + PROTOCOL_MAJOR);
                         closeAfterFlush("protocol_mismatch");
-                        return false;
+                        return;
                     }
                     helloSeen = true;
                     result = hello(args);
@@ -232,8 +259,10 @@ final class Session implements Sink {
         } catch (RuntimeException e) {
             log.error("op_failed", "op", op, "error", e.toString());
             sendError(id, OpException.INTERNAL, "internal error");
+        } catch (LinkageError e) {
+            log.error("op_failed", "op", op, "error", e.toString());
+            sendError(id, OpException.VENUE_ERROR, "the IB client library is incomplete: " + e.getMessage());
         }
-        return true;
     }
 
     static boolean majorMatches(String protocol) {
@@ -294,24 +323,41 @@ final class Session implements Sink {
 
     @Override
     public long event(String name, Map<String, Object> data) {
-        Map<String, Object> m = new LinkedHashMap<>();
         long s;
-        String key = null;
+        boolean tooSlow;
         synchronized (lock) {
             if (closed) {
                 return 0;
             }
+            // seq is taken and the event queued in one critical section, so the
+            // order on the wire is the order of seq even with many emitting threads
             s = seq.incrementAndGet();
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("event", name);
+            m.put("seq", s);
+            m.put("at", Instant.now().toString());
+            m.put("data", data);
+            String key = null;
             if (CONFLATABLE.contains(name)) {
                 key = name + "/" + data.get("req_id") + "/" + data.get("tick_type");
             }
+            tooSlow = enqueueLocked(Json.write(m), key);
         }
-        m.put("event", name);
-        m.put("seq", s);
-        m.put("at", Instant.now().toString());
-        m.put("data", data);
-        enqueue(Json.write(m), key);
+        if (tooSlow) {
+            overflow();
+        }
         return s;
+    }
+
+    @Override
+    public long lastSeq() {
+        return seq.get();
+    }
+
+    @Override
+    public void abort(String reason) {
+        log.warn("session_aborted", "reason", reason);
+        close(reason);
     }
 
     /** Heartbeat: sent every interval while connected. */
@@ -321,34 +367,55 @@ final class Session implements Sink {
         event("heartbeat", d);
     }
 
+    /** Closes a connection that has not said hello within the allowed time. */
+    void expireIfNoHello() {
+        if (!helloSeen && System.nanoTime() - startedNanos > cfg.helloTimeoutMillis * 1_000_000L) {
+            log.warn("hello_timeout");
+            close("hello_timeout");
+        }
+    }
+
+    /** Queues a response line (not conflatable). */
     private void enqueue(String line, String key) {
-        byte[] bytes = (line + "\n").getBytes(StandardCharsets.UTF_8);
-        boolean tooSlow = false;
+        boolean tooSlow;
         synchronized (lock) {
             if (closed) {
                 return;
             }
-            Out existing = key == null ? null : conflate.get(key);
-            if (existing != null) {
-                queuedBytes += bytes.length - existing.bytes.length;
-                existing.bytes = bytes;
-            } else {
-                Out o = new Out(bytes, key);
-                queue.addLast(o);
-                if (key != null) {
-                    conflate.put(key, o);
-                }
-                queuedBytes += bytes.length;
-            }
-            if (queuedBytes > cfg.maxQueueBytes) {
-                tooSlow = true;
-            }
-            lock.notifyAll();
+            tooSlow = enqueueLocked(line, key);
         }
         if (tooSlow) {
-            log.warn("client_too_slow", "queued_bytes", queuedBytes);
-            close("client_too_slow");
+            overflow();
         }
+    }
+
+    /**
+     * Appends a line. A conflatable event replaces an older queued event with the
+     * same key by tombstoning it and appending the new one at the tail, so queue
+     * order and seq order stay the same.
+     *
+     * @return true when the queue passed its cap
+     */
+    private boolean enqueueLocked(String line, String key) {
+        byte[] bytes = (line + "\n").getBytes(StandardCharsets.UTF_8);
+        Out existing = key == null ? null : conflate.get(key);
+        if (existing != null) {
+            existing.dead = true;
+            queuedBytes -= existing.bytes.length;
+        }
+        Out o = new Out(bytes, key);
+        queue.addLast(o);
+        if (key != null) {
+            conflate.put(key, o);
+        }
+        queuedBytes += bytes.length;
+        lock.notifyAll();
+        return queuedBytes > cfg.maxQueueBytes;
+    }
+
+    private void overflow() {
+        log.warn("client_too_slow", "queued_bytes", queuedBytes);
+        close("client_too_slow");
     }
 
     private void writeLoop() {
@@ -367,6 +434,9 @@ final class Session implements Sink {
                         return;
                     }
                     o = queue.pollFirst();
+                    if (o.dead) {
+                        continue;
+                    }
                     if (o.key != null) {
                         conflate.remove(o.key);
                     }

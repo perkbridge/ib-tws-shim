@@ -57,7 +57,12 @@ final class Times {
         }
         try {
             LocalDateTime ldt = LocalDateTime.parse(p[0] + " " + p[1], IB_DATE_TIME);
-            ZoneId z = ZoneId.of(p[2], ZoneId.SHORT_IDS);
+            // region ids ("US/Eastern", "Europe/London"), UTC and GMT only: three-letter
+            // abbreviations such as BST, IST or CST name several zones, so the caller keeps the raw text
+            if (!(p[2].contains("/") || p[2].equals("UTC") || p[2].equals("GMT"))) {
+                return null;
+            }
+            ZoneId z = ZoneId.of(p[2]);
             return ZonedDateTime.of(ldt, z).toInstant().toString();
         } catch (java.time.DateTimeException e) {
             return null;

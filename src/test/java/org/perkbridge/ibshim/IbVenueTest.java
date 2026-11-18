@@ -31,6 +31,8 @@ class IbVenueTest {
     @BeforeEach
     void start() throws Exception {
         EClientSocket.calls.clear();
+        EClientSocket.execTime = null;
+        EClientSocket.emptyPositions = false;
         sock = dir.resolve("ib.sock");
         ServerConfig cfg = new ServerConfig(sock);
         cfg.heartbeatMillis = 60_000;
@@ -364,5 +366,113 @@ class IbVenueTest {
             assertEquals("104", last.get("price"));
             assertEquals(9L, last.get("req_id"));
         }
+    }
+
+    @Test
+    void aGatewayThatClosesDuringTheHandshakeFailsConnectAtOnceWithItsFirstError() throws Exception {
+        try (TestClient c = hello()) {
+            long t0 = System.nanoTime();
+            Map<String, Object> r = c.call("connect", "{\"host\":\"dropme\",\"port\":4002,\"client_id\":1,\"connect_timeout_ms\":20000}");
+            assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0) < 3000, "must not wait out the timeout");
+            assertEquals("venue_error", code(r));
+            assertEquals(326L, ((Map<?, ?>) r.get("error")).get("venue_code"));
+            assertEquals(0, c.events("disconnected", 300).size(), "no disconnected for a connection that was never announced");
+        }
+    }
+
+    @Test
+    void aCallbackThatCannotBeTranslatedEndsTheSessionInsteadOfLosingTheEvent() throws Exception {
+        try (TestClient c = hello()) {
+            connect(c);
+            EClientSocket cl = EClientSocket.last;
+            cl.post(() -> cl.wrapper.orderStatus(1, "Filled")); // wrong arity for what the adapter expects
+            String l;
+            do {
+                l = c.next(3000);
+                assertNotNull(l, "the session must end");
+            } while (!TestClient.isEof(l));
+        }
+    }
+
+    @Test
+    void lateCallbacksOfAClosedConnectionReachNobody() throws Exception {
+        try (TestClient c = hello()) {
+            connect(c);
+            EClientSocket old = EClientSocket.last;
+            assertEquals(Boolean.TRUE, c.call("disconnect", null).get("ok"));
+            c.waitEvent("disconnected", 3000);
+            old.wrapper.openOrderEnd();
+            assertEquals(0, c.events("open_order_end", 300).size());
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void ambiguousZoneAbbreviationsKeepOnlyTheRawTime() throws Exception {
+        try (TestClient c = hello()) {
+            connect(c);
+            EClientSocket.execTime = "20261118  09:30:01 BST";
+            c.call("executions", "{\"req_id\":3}");
+            Map<String, Object> ex = (Map<String, Object>) ((Map<String, Object>) c.waitEvent("exec_details", 3000).get("data")).get("execution");
+            assertFalse(ex.containsKey("time"), "BST is ambiguous: no guessed time");
+            assertEquals("20261118  09:30:01 BST", ex.get("time_raw"));
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void asOfSeqIsFreshPerRequestEvenForAnEmptySnapshot() throws Exception {
+        try (TestClient c = hello()) {
+            connect(c);
+            c.call("positions", null);
+            c.waitEvent("position", 3000);
+            Map<String, Object> end1 = c.waitEvent("position_end", 3000);
+            EClientSocket.emptyPositions = true;
+            c.call("positions", null);
+            Map<String, Object> end2 = c.waitEvent("position_end", 3000);
+            long a1 = (Long) ((Map<String, Object>) end1.get("data")).get("as_of_seq");
+            long a2 = (Long) ((Map<String, Object>) end2.get("data")).get("as_of_seq");
+            assertTrue(a2 > a1, "stale as_of_seq: " + a1 + " then " + a2);
+            assertTrue(a2 <= (Long) end2.get("seq"));
+        }
+    }
+
+    @Test
+    void negativePricesAreAllowedAndFieldTypeErrorsAreBadRequests() throws Exception {
+        try (TestClient c = hello()) {
+            connect(c);
+            String k = "\"contract\":{\"symbol\":\"ES\",\"sec_type\":\"FUT\",\"exchange\":\"CME\",\"currency\":\"USD\"}";
+            assertEquals(Boolean.TRUE, c.call("place_order", "{\"order_id\":8," + k
+                    + ",\"order\":{\"action\":\"BUY\",\"order_type\":\"LMT\",\"total_quantity\":\"1\",\"lmt_price\":\"-1.5\"}}").get("ok"));
+            for (String bad : new String[] {"\"parent_id\":\"5\"", "\"transmit\":\"false\"", "\"parent_id\":99999999999",
+                "\"tif\":5", "\"order_ref\":7"}) {
+                assertEquals("bad_request", code(c.call("place_order", "{\"order_id\":9," + k
+                        + ",\"order\":{\"action\":\"BUY\",\"order_type\":\"MKT\",\"total_quantity\":\"1\"," + bad + "}}")), bad);
+            }
+            assertEquals("bad_request", code(c.call("executions", "{\"req_id\":1,\"filter\":{\"client_id\":\"x\"}}")));
+            assertEquals(Boolean.TRUE, c.call("executions", "{\"req_id\":1,\"filter\":{\"symbol\":null}}").get("ok"));
+        }
+    }
+
+    @Test
+    void aWaitingConnectIsReleasedWhenTheClientGoesAway() throws Exception {
+        TestClient c = hello();
+        c.send("connect", "{\"host\":\"silent\",\"port\":4002,\"client_id\":1,\"connect_timeout_ms\":60000}");
+        Thread.sleep(300);
+        c.close();
+        // the shim must free its only client slot long before the 60 s connect timeout
+        TestClient next = null;
+        for (int i = 0; i < 60 && next == null; i++) {
+            TestClient t = new TestClient(sock);
+            String l = t.next(300);
+            if (l != null && l.contains("busy")) {
+                t.close();
+                Thread.sleep(100);
+                continue;
+            }
+            next = t;
+        }
+        assertNotNull(next, "client slot stayed blocked behind connect");
+        next.close();
     }
 }

@@ -12,4 +12,10 @@ public interface Sink {
      *     because no client is connected any more
      */
     long event(String name, Map<String, Object> data);
+
+    /** The highest seq handed out so far in this process. */
+    long lastSeq();
+
+    /** Ends the client session at once (a callback could not be translated). */
+    void abort(String reason);
 }

@@ -345,4 +345,73 @@ class ServerTest {
         assertThrows(Server.SocketUnusableException.class,
                 () -> new Server(new ServerConfig(dir.resolve("nodir/s.sock")), new FakeVenue(), quiet).bind());
     }
+
+    @Test
+    void seqNeverGoesBackwardsOnTheWireWithInterleavedConflatedTicksAndConcurrentEmitters() throws Exception {
+        try (TestClient c = helloClient()) {
+            Sink s = venue.sink;
+            c.paused = true;
+            Thread[] ts = new Thread[4];
+            for (int t = 0; t < ts.length; t++) {
+                final int id = t;
+                ts[t] = new Thread(() -> {
+                    for (int i = 0; i < 20_000; i++) {
+                        Map<String, Object> d = new LinkedHashMap<>();
+                        d.put("req_id", (long) (i % 3)); // few keys: heavy interleaving
+                        d.put("tick_type", 4L);
+                        d.put("price", String.valueOf(i));
+                        d.put("pad", "x".repeat(300));
+                        s.event(i % 50 == 0 ? "order_status" : "tick_price", d);
+                    }
+                });
+                ts[t].start();
+            }
+            for (Thread t : ts) {
+                t.join();
+            }
+            s.event("heartbeat", new LinkedHashMap<>());
+            c.paused = false;
+            long last = 0;
+            int n = 0;
+            while (true) {
+                String l = c.next(5000);
+                assertNotNull(l);
+                Map<String, Object> m = Json.parseObject(l);
+                if (!m.containsKey("seq")) {
+                    continue;
+                }
+                long seq = (Long) m.get("seq");
+                assertTrue(seq > last, "seq went backwards: " + last + " then " + seq);
+                last = seq;
+                n++;
+                if ("heartbeat".equals(m.get("event"))) {
+                    break;
+                }
+            }
+            assertTrue(n > 1000);
+        }
+    }
+
+    @Test
+    void aConnectionThatNeverSaysHelloIsClosed() throws Exception {
+        server.close();
+        start(c -> {
+            c.heartbeatMillis = 100;
+            c.helloTimeoutMillis = 300;
+        });
+        try (TestClient c = new TestClient(sock)) {
+            String l;
+            do {
+                l = c.next(3000);
+                assertNotNull(l, "must be closed after the hello timeout");
+            } while (!TestClient.isEof(l));
+        }
+    }
+
+    @Test
+    void bindLeavesNoTemporaryFilesBehind() throws Exception {
+        try (var names = Files.list(dir)) {
+            assertEquals(List.of("s.sock"), names.map(p -> p.getFileName().toString()).sorted().toList());
+        }
+    }
 }
