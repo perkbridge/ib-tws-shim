@@ -48,7 +48,15 @@ public class EClientSocket {
         post(() -> wrapper.nextValidId(1000));
         post(() -> wrapper.managedAccounts("DU1,DU2"));
     }
-    public void eDisconnect() { calls.add("eDisconnect"); connected = false; signal.issueSignal(); }
+    public void eDisconnect() {
+        calls.add("eDisconnect");
+        boolean was = connected;
+        connected = false;
+        signal.issueSignal();
+        if (was) { wrapper.connectionClosed(); } // like the real library: on the calling thread
+    }
+    /** Test hook: IB's own reader thread sees the socket close while decoded messages still wait. */
+    public void ibThreadClose() { wrapper.error(new RuntimeException("EOF")); eDisconnect(); }
     public boolean isConnected() { return connected; }
     public int serverVersion() { return 176; }
     public String getTwsConnectionTime() { return "20261118 14:00:00 UTC"; }

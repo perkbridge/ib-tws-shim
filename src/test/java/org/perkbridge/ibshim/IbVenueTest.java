@@ -567,4 +567,65 @@ class IbVenueTest {
         assertNotNull(next, "client slot stayed blocked behind connect");
         next.close();
     }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void disconnectedIsAnnouncedAfterEveryEventThatWasQueuedBeforeTheSocketClosed() throws Exception {
+        try (TestClient c = hello()) {
+            connect(c);
+            EClientSocket cl = EClientSocket.last;
+            cl.post(() -> { try { Thread.sleep(300); } catch (InterruptedException e) { Thread.currentThread().interrupt(); } });
+            cl.post(() -> cl.wrapper.orderStatus(77, "Filled", com.ib.client.Decimal.parse("10"), com.ib.client.Decimal.parse("0"),
+                    187.25, 4242L, 0, 187.25, 7, "", Double.MAX_VALUE));
+            Thread.sleep(50);
+            cl.ibThreadClose(); // IB's reader thread closes while the fill is still queued for the shim
+            long seqFill = -1;
+            long seqClosed = -1;
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while ((seqFill < 0 || seqClosed < 0) && System.nanoTime() < deadline) {
+                String l = c.next(500);
+                if (l == null || TestClient.isEof(l)) {
+                    continue;
+                }
+                Map<String, Object> m = Json.parseObject(l);
+                if ("order_status".equals(m.get("event"))) {
+                    seqFill = (Long) m.get("seq");
+                } else if ("disconnected".equals(m.get("event"))) {
+                    seqClosed = (Long) m.get("seq");
+                }
+            }
+            assertTrue(seqFill > 0, "the queued fill must still be delivered");
+            assertTrue(seqClosed > seqFill, "disconnected (" + seqClosed + ") must follow the fill (" + seqFill + ")");
+        }
+    }
+
+    @Test
+    void nullsInOrdersAreRefusedBecauseTheyWouldMeanIbsDefault() throws Exception {
+        try (TestClient c = hello()) {
+            connect(c);
+            String k = "\"contract\":{\"symbol\":\"AAPL\",\"sec_type\":\"STK\",\"exchange\":\"SMART\",\"currency\":\"USD\"}";
+            String base = "\"action\":\"BUY\",\"order_type\":\"MKT\",\"total_quantity\":\"1\"";
+            for (String bad : new String[] {"\"what_if\":null", "\"transmit\":null", "\"parent_id\":null", "\"lmt_price\":null", "\"tif\":null"}) {
+                assertEquals("bad_request", code(c.call("place_order", "{\"order_id\":5," + k + ",\"order\":{" + base + "," + bad + "}}")), bad);
+            }
+            assertEquals("bad_request", code(c.call("place_order", "{\"order_id\":5,\"contract\":{\"symbol\":null},\"order\":{" + base + "}}")));
+            assertEquals("bad_request", code(c.call("cancel_order", "{\"order_id\":5,\"manual_time\":null}")));
+            assertFalse(EClientSocket.calls.stream().anyMatch(s -> s.startsWith("placeOrder") || s.startsWith("cancelOrder")));
+        }
+    }
+
+    @Test
+    void ordersAreRefusedWhenIbItselfNoLongerReportsAConnection() throws Exception {
+        try (TestClient c = hello()) {
+            connect(c);
+            EClientSocket cl = EClientSocket.last;
+            cl.gatewayClosed();
+            // before the shim's own flag has caught up, IB's isConnected is already false
+            String k = "\"contract\":{\"symbol\":\"AAPL\",\"sec_type\":\"STK\",\"exchange\":\"SMART\",\"currency\":\"USD\"}";
+            Map<String, Object> r = c.call("place_order", "{\"order_id\":5," + k
+                    + ",\"order\":{\"action\":\"BUY\",\"order_type\":\"MKT\",\"total_quantity\":\"1\"}}");
+            assertEquals("not_connected", code(r));
+            assertFalse(EClientSocket.calls.contains("placeOrder 5"));
+        }
+    }
 }

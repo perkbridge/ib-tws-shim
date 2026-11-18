@@ -57,6 +57,8 @@ public final class IbVenue implements Venue {
     private volatile boolean connected;
     private volatile Conn conn;
     private volatile java.net.Socket pendingSocket;
+    private volatile java.net.Socket liveSocket;
+    private volatile boolean detachRequested;
 
     private final Map<String, AtomicLong> dropped = new ConcurrentHashMap<>();
 
@@ -141,18 +143,21 @@ public final class IbVenue implements Venue {
 
     @Override
     public void attach(Sink s) {
+        this.detachRequested = false;
         this.sink = s;
     }
 
     @Override
     public void detach() {
         // a connect that is still waiting holds the monitor: wake it first
-        java.net.Socket ps = pendingSocket;
-        if (ps != null) {
-            try {
-                ps.close(); // frees an eConnect that is blocked in socket I/O
-            } catch (java.io.IOException ignored) {
-                // already closed
+        detachRequested = true; // a connect that has not published its socket yet sees this
+        for (java.net.Socket ps : new java.net.Socket[] {pendingSocket, liveSocket}) {
+            if (ps != null) {
+                try {
+                    ps.close(); // frees a call that is blocked in socket I/O and holds the monitor
+                } catch (java.io.IOException ignored) {
+                    // already closed
+                }
             }
         }
         Conn pending = conn;
@@ -329,7 +334,9 @@ public final class IbVenue implements Venue {
 
     private Conn requireConn() throws OpException {
         Conn c = conn;
-        if (c == null || client == null || !connected) {
+        if (c == null || client == null || !connected || !Boolean.TRUE.equals(safeIsConnected(client))) {
+            // IB's own isConnected is checked too: its placeOrder answers a closed socket with an
+            // error event (504, no order id) and returns normally, which must not look like success
             throw new OpException(OpException.NOT_CONNECTED, "not connected to the gateway");
         }
         return c;
@@ -383,14 +390,21 @@ public final class IbVenue implements Venue {
         // handshake, so that a silent host cannot hold the client slot; detach() can close it.
         java.net.Socket sock = new java.net.Socket();
         pendingSocket = sock;
+        liveSocket = sock;
         try {
+            if (detachRequested) {
+                throw new java.io.IOException("client gone");
+            }
             sock.connect(new java.net.InetSocketAddress(host, port), timeoutMs);
             sock.setTcpNoDelay(true);
             sock.setSoTimeout(timeoutMs);
+            if (detachRequested) {
+                throw new java.io.IOException("client gone");
+            }
             Reflect.call(client, "eConnect", sock, (long) clientId);
             sock.setSoTimeout(0);
         } catch (java.io.IOException | RuntimeException e) {
-            boolean gone = c.aborted;
+            boolean gone = c.aborted || detachRequested;
             try {
                 sock.close();
             } catch (java.io.IOException ignored) {
@@ -577,6 +591,7 @@ public final class IbVenue implements Venue {
         signal = null;
         reader = null;
         readerThread = null;
+        liveSocket = null;
         connected = false;
         if (!emitRequested) {
             conn = null;
@@ -611,9 +626,11 @@ public final class IbVenue implements Venue {
     private Map<String, Object> placeOrder(Map<String, Object> a) throws OpException {
         requireConn();
         strict(a, Set.of("order_id", "contract", "order"), "place_order args");
+        noNulls(a, "place_order");
         int orderId = intIn(a, "order_id", 1, Integer.MAX_VALUE);
         Map<String, Object> o = obj(a, "order", true);
         strict(o, ORDER_KEYS, "order");
+        noNulls(o, "order");
         Object contract = contract(obj(a, "contract", true), true);
         Object order = newOf("com.ib.client.Order");
 
@@ -659,6 +676,7 @@ public final class IbVenue implements Venue {
     private Map<String, Object> cancelOrder(Map<String, Object> a) throws OpException {
         requireConn();
         strict(a, Set.of("order_id", "manual_time"), "cancel_order args");
+        noNulls(a, "cancel_order");
         int id = intIn(a, "order_id", 1, Integer.MAX_VALUE);
         String manual = str(a, "manual_time", false);
         String ib = manual == null ? "" : Times.toIb(manual);
@@ -677,6 +695,7 @@ public final class IbVenue implements Venue {
     private Object contract(Map<String, Object> c, boolean strictKeys) {
         if (strictKeys) {
             strict(c, CONTRACT_KEYS, "contract");
+            noNulls(c, "contract");
         }
         decimalAny(c, "strike");
         Object k = newOf("com.ib.client.Contract");
@@ -816,8 +835,20 @@ public final class IbVenue implements Venue {
                 emitC(c, "current_time", d);
             }
             case "connectionClosed" -> {
-                if (!c.userDisconnect) {
-                    connectionClosed(c, "gateway_closed", "gateway socket closed");
+                // IB calls this from its own reader thread while decoded messages may still wait for
+                // ours: never announce the close here. Wake the shim reader, which announces it after
+                // draining everything that was queued before the socket closed.
+                if (!c.connectedSent) {
+                    connectionClosed(c, "gateway_closed", "gateway socket closed"); // wakes connect
+                } else if (!c.userDisconnect) {
+                    Object sig = signal;
+                    if (sig != null) {
+                        try {
+                            Reflect.call(sig, "issueSignal");
+                        } catch (RuntimeException ignored) {
+                            // reader is already stopping
+                        }
+                    }
                 }
             }
             case "error" -> onError(c, ar);
@@ -1187,6 +1218,14 @@ public final class IbVenue implements Venue {
 
     private static long reqId(Map<String, Object> m) {
         return intIn(m, "req_id", 0, Integer.MAX_VALUE);
+    }
+
+    private static void noNulls(Map<String, Object> m, String what) {
+        for (Map.Entry<String, Object> e : m.entrySet()) {
+            if (e.getValue() == null) {
+                throw new IllegalArgumentException(what + "." + e.getKey() + " must not be null; omit the field to use IB's default");
+            }
+        }
     }
 
     private static void checkOrderTypes(Map<String, Object> o) {
