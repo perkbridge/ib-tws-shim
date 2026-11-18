@@ -486,6 +486,54 @@ class IbVenueTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void openOrderCarriesPermIdAndTrailingFieldsOfOrdersPlacedOutsideTheClient() throws Exception {
+        try (TestClient c = hello()) {
+            connect(c);
+            EClientSocket cl = EClientSocket.last;
+            com.ib.client.Contract k = new com.ib.client.Contract();
+            k.symbol("AAPL");
+            com.ib.client.Order trail = new com.ib.client.Order();
+            trail.action(com.ib.client.Order.Action.SELL);
+            trail.orderType("TRAIL");
+            trail.totalQuantity(com.ib.client.Decimal.parse("5"));
+            trail.permId(918273645);
+            trail.trailStopPrice(187.5);
+            trail.trailingPercent(1.25);
+            cl.externalOpenOrder(0, k, trail);
+            com.ib.client.Order mkt = new com.ib.client.Order();
+            mkt.action(com.ib.client.Order.Action.BUY);
+            mkt.orderType("MKT");
+            mkt.totalQuantity(com.ib.client.Decimal.parse("3"));
+            cl.externalOpenOrder(0, k, mkt); // permId not yet assigned
+            List<Map<String, Object>> evs = c.events("open_order", 1000);
+            assertEquals(2, evs.size());
+            Map<String, Object> d0 = (Map<String, Object>) evs.get(0).get("data");
+            Map<String, Object> o0 = (Map<String, Object>) d0.get("order");
+            assertEquals(0L, d0.get("order_id"));
+            assertEquals(918273645L, o0.get("perm_id"));
+            assertEquals("187.5", o0.get("trail_stop_price"));
+            assertEquals("1.25", o0.get("trailing_percent"));
+            Map<String, Object> o1 = (Map<String, Object>) ((Map<String, Object>) evs.get(1).get("data")).get("order");
+            assertEquals(0L, o1.get("perm_id"));
+            assertFalse(o1.containsKey("trail_stop_price"), "IB's unset sentinel must be omitted");
+            assertFalse(o1.containsKey("trailing_percent"));
+        }
+    }
+
+    @Test
+    void permIdAndTrailFieldsAreOutputOnlyAndRejectedInAnOrderToPlace() throws Exception {
+        try (TestClient c = hello()) {
+            connect(c);
+            String args = "{\"order_id\":1002,\"contract\":{\"symbol\":\"AAPL\",\"sec_type\":\"STK\",\"exchange\":\"SMART\","
+                    + "\"currency\":\"USD\"},\"order\":{\"action\":\"BUY\",\"order_type\":\"MKT\",\"total_quantity\":\"1\","
+                    + "\"perm_id\":5,\"trail_stop_price\":\"9\"}}";
+            assertEquals("bad_request", code(c.call("place_order", args)));
+            assertFalse(EClientSocket.last.calls.contains("placeOrder 1002"));
+        }
+    }
+
+    @Test
     void lateCallbacksOfAClosedConnectionReachNobody() throws Exception {
         try (TestClient c = hello()) {
             connect(c);

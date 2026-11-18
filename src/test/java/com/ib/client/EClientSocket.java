@@ -74,6 +74,8 @@ public class EClientSocket {
         post(() -> wrapper.openOrder(id, c, o, new OrderState()));
         post(() -> wrapper.orderStatus(id, "Submitted", Decimal.parse("0"), Decimal.parse("10"), 0.0, 4242L, 0, 0.0, 7, "", Double.MAX_VALUE));
     }
+    /** Test hook: an order placed outside this client (TWS): orderId 0 and its own permId. */
+    public void externalOpenOrder(int id, Contract c, Order o) { post(() -> wrapper.openOrder(id, c, o, new OrderState())); }
     public void cancelOrder(int id, String manual) { calls.add("cancelOrder " + id + " [" + manual + "]"); }
     public void reqGlobalCancel() { calls.add("reqGlobalCancel"); }
     public void reqAllOpenOrders() { calls.add("reqAllOpenOrders"); post(wrapper::openOrderEnd); }

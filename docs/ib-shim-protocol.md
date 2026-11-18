@@ -102,7 +102,7 @@ The first request on a connection must be `hello`.
 
 ```json
 {"id":"1","op":"hello","args":{"protocol":"perkbridge.ibshim/v1","client":"example-client/1.0"}}
-{"id":"1","ok":true,"result":{"protocol":"perkbridge.ibshim/v1","shim":"ib-tws-shim/0.1.0",
+{"id":"1","ok":true,"result":{"protocol":"perkbridge.ibshim/v1","shim":"ib-tws-shim/0.2.0",
   "api_client":"<version string reported by the IB client library>",
   "ops":["connect","disconnect",...]}}
 ```
@@ -160,6 +160,13 @@ requires `good_till_date`), `order_ref`,
 `account`, `oca_group`, `oca_type` (int), `parent_id`, `transmit`
 (bool), `outside_rth` (bool), `good_till_date` (RFC 3339), `what_if` (bool). Fields the client does
 not set are omitted and the shim leaves the IB defaults.
+
+`order` in `open_order` and `completed_order` also carries what the venue
+reports about an order (v0.2.0, additive; never accepted in an order to
+place): `perm_id` (int; IB's permanent order id, `0` until the gateway has
+assigned one; unlike `order_id` it is unique per account and the same for an
+order placed in TWS, whose `order_id` is `0`), `trail_stop_price` (string)
+and `trailing_percent` (string), the last two only when the order has them.
 
 `order_state` (in `open_order`): `status`, `commission` (string),
 `commission_currency`, `warning_text`, `init_margin_change`,

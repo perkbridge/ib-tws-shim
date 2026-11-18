@@ -68,7 +68,7 @@ class ServerTest {
             Map<String, Object> r = c.call("hello", "{\"protocol\":\"perkbridge.ibshim/v1\",\"client\":\"test/1\"}");
             Map<String, Object> res = (Map<String, Object>) r.get("result");
             assertEquals("perkbridge.ibshim/v1", res.get("protocol"));
-            assertEquals("ib-tws-shim/0.1.0", res.get("shim"));
+            assertEquals("ib-tws-shim/0.2.0", res.get("shim"));
             assertEquals("fake-api/1", res.get("api_client"));
             assertEquals(List.of("hello", "ping", "echo", "fail"), res.get("ops"));
         }

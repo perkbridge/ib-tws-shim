@@ -24,4 +24,8 @@ public class Order {
     public boolean outsideRth() { return outsideRth; } public void outsideRth(boolean v) { outsideRth = v; }
     public String goodTillDate() { return goodTillDate; } public void goodTillDate(String v) { goodTillDate = v; }
     public boolean whatIf() { return whatIf; } public void whatIf(boolean v) { whatIf = v; }
+    private int permId; private double trailStopPrice = Double.MAX_VALUE, trailingPercent = Double.MAX_VALUE;
+    public int permId() { return permId; } public void permId(int v) { permId = v; }
+    public double trailStopPrice() { return trailStopPrice; } public void trailStopPrice(double v) { trailStopPrice = v; }
+    public double trailingPercent() { return trailingPercent; } public void trailingPercent(double v) { trailingPercent = v; }
 }

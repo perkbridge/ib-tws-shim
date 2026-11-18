@@ -68,6 +68,23 @@ final class Mapper {
         r("what_if", Kind.BOOL, "whatIf"),
     };
 
+    /**
+     * The order as the gateway reports it: ORDER plus the fields the venue assigns or only reports
+     * (the permanent id, 0 until the gateway has assigned one, and the trailing stop's price and
+     * percent when set). Never used to build an order to place.
+     */
+    static final Row[] ORDER_OUT = concat(ORDER, new Row[] {
+        r("perm_id", Kind.INT, "permId"),
+        r("trail_stop_price", Kind.DEC, "trailStopPrice"),
+        r("trailing_percent", Kind.DEC, "trailingPercent"),
+    });
+
+    private static Row[] concat(Row[] a, Row[] b) {
+        Row[] all = java.util.Arrays.copyOf(a, a.length + b.length);
+        System.arraycopy(b, 0, all, a.length, b.length);
+        return all;
+    }
+
     static final Row[] ORDER_STATE = {
         r("status", Kind.STR),
         r("commission", Kind.DEC, "commission", "commissionAndFees"),

@@ -855,14 +855,14 @@ public final class IbVenue implements Venue {
             case "openOrder" -> {
                 d.put("order_id", num(ar[0]));
                 d.put("contract", Mapper.out(ar[1], Mapper.CONTRACT));
-                d.put("order", Mapper.out(ar[2], Mapper.ORDER));
+                d.put("order", Mapper.out(ar[2], Mapper.ORDER_OUT));
                 d.put("order_state", Mapper.out(ar[3], Mapper.ORDER_STATE));
                 emitC(c, "open_order", d);
             }
             case "openOrderEnd" -> emitC(c, "open_order_end", d);
             case "completedOrder" -> {
                 d.put("contract", Mapper.out(ar[0], Mapper.CONTRACT));
-                d.put("order", Mapper.out(ar[1], Mapper.ORDER));
+                d.put("order", Mapper.out(ar[1], Mapper.ORDER_OUT));
                 d.put("order_state", Mapper.out(ar[2], Mapper.ORDER_STATE));
                 emitC(c, "completed_order", d);
             }
