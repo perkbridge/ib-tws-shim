@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>org.perkbridge</groupId>
+  <artifactId>ib-tws-shim</artifactId>
+  <version>0.1.0</version>
+  <packaging>jar</packaging>
+  <name>ib-tws-shim</name>
+  <description>Protocol adapter: perkbridge.ibshim/v1 on a unix socket in front of Interactive Brokers' official Java client.</description>
+
+  <licenses>
+    <license>
+      <name>GPL-3.0-or-later</name>
+      <url>https://www.gnu.org/licenses/gpl-3.0.html</url>
+    </license>
+  </licenses>
+
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <project.build.outputTimestamp>2026-11-18T00:00:00Z</project.build.outputTimestamp>
+  </properties>
+
+  <!-- No runtime dependencies on purpose: the jar holds only this repository's
+       classes. IB's TwsApi.jar is never bundled; it is passed on the command line (api-jar option). -->
+  <dependencies>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.10.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <finalName>ib-tws-shim</finalName>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.13.0</version>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.2.5</version>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <version>3.4.1</version>
+        <configuration>
+          <archive>
+            <manifest>
+              <mainClass>org.perkbridge.ibshim.Main</mainClass>
+              <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
+            </manifest>
+          </archive>
+          <!-- the test-only fake IB API (src/test) never ends up in the jar -->
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

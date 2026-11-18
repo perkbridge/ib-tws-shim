@@ -1,0 +1,76 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// TEST DOUBLE. Not IB code: a minimal stand-in written for this repository so the
+// adapter can be exercised without IB's library. Names mirror the public API shape.
+package com.ib.client;
+
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.ArrayList;
+import java.util.List;
+
+public class EClientSocket {
+    public static final int CLIENT_VERSION = 66;
+    /** Test hooks. */
+    public static volatile EClientSocket last;
+    public static final List<String> calls = java.util.Collections.synchronizedList(new ArrayList<>());
+    public static volatile Contract lastContract;
+    public static volatile Order lastOrder;
+    public static volatile ExecutionFilter lastFilter;
+    public final EWrapper wrapper;
+    private final EJavaSignal signal;
+    private final ConcurrentLinkedQueue<Runnable> q = new ConcurrentLinkedQueue<>();
+    private volatile boolean connected;
+
+    public EClientSocket(EWrapper w, EJavaSignal s) { wrapper = w; signal = s; last = this; }
+
+    public void eConnect(String host, int port, int clientId) {
+        calls.add("eConnect " + host + " " + port + " " + clientId);
+        if (host.equals("refuse")) { wrapper.error(-1, 502, "Couldn't connect to TWS", ""); return; }
+        connected = true;
+        if (host.equals("silent")) { return; }
+        post(() -> wrapper.nextValidId(1000));
+        post(() -> wrapper.managedAccounts("DU1,DU2"));
+    }
+    public void eDisconnect() { calls.add("eDisconnect"); connected = false; signal.issueSignal(); }
+    public boolean isConnected() { return connected; }
+    public int serverVersion() { return 176; }
+    public String getTwsConnectionTime() { return "20261118 14:00:00 UTC"; }
+
+    /** Test hook: run a callback on the reader thread. */
+    public void post(Runnable r) { q.add(r); signal.issueSignal(); }
+    public void drain() { Runnable r; while ((r = q.poll()) != null) r.run(); }
+    /** Test hook: the gateway drops the socket. */
+    public void gatewayClosed() { connected = false; post(wrapper::connectionClosed); }
+
+    public void reqIds(int n) { calls.add("reqIds " + n); post(() -> wrapper.nextValidId(2000)); }
+    public void reqCurrentTime() { calls.add("reqCurrentTime"); post(() -> wrapper.currentTime(1795000000L)); }
+    public void placeOrder(int id, Contract c, Order o) {
+        calls.add("placeOrder " + id); lastContract = c; lastOrder = o;
+        post(() -> wrapper.openOrder(id, c, o, new OrderState()));
+        post(() -> wrapper.orderStatus(id, "Submitted", Decimal.parse("0"), Decimal.parse("10"), 0.0, 4242L, 0, 0.0, 7, "", Double.MAX_VALUE));
+    }
+    public void cancelOrder(int id, String manual) { calls.add("cancelOrder " + id + " [" + manual + "]"); }
+    public void reqGlobalCancel() { calls.add("reqGlobalCancel"); }
+    public void reqAllOpenOrders() { calls.add("reqAllOpenOrders"); post(wrapper::openOrderEnd); }
+    public void reqOpenOrders() { calls.add("reqOpenOrders"); post(wrapper::openOrderEnd); }
+    public void reqExecutions(int id, ExecutionFilter f) {
+        calls.add("reqExecutions " + id); lastFilter = f;
+        Contract c = new Contract(); c.symbol("AAPL"); c.conid(265598);
+        post(() -> wrapper.execDetails(id, c, new Execution()));
+        post(() -> wrapper.commissionReport(new CommissionReport()));
+        post(() -> wrapper.execDetailsEnd(id));
+    }
+    public void reqPositions() {
+        calls.add("reqPositions");
+        Contract c = new Contract(); c.symbol("AAPL"); c.conid(265598);
+        post(() -> wrapper.position("DU1", c, Decimal.parse("10"), 187.25));
+        post(wrapper::positionEnd);
+    }
+    public void cancelPositions() { calls.add("cancelPositions"); }
+    public void reqMktData(int id, Contract c, String ticks, boolean snap, boolean reg, List<Object> opts) {
+        calls.add("reqMktData " + id + " snap=" + snap);
+        for (int i = 0; i < 5; i++) { final int n = i; post(() -> wrapper.tickPrice(id, 1, 100 + n, new TickAttrib())); }
+    }
+    public void cancelMktData(int id) { calls.add("cancelMktData " + id); }
+    /** Test hook: raises an IB error callback. */
+    public void raise(int id, int code, String msg) { post(() -> wrapper.error(id, code, msg, "")); }
+}
