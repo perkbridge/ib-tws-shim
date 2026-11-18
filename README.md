@@ -19,9 +19,8 @@ in `LICENSE-IB-NOTES.md`).
 
 ## The protocol
 
-The protocol is documented in `docs/ib-shim-protocol.md` of the PerkBridge `nile`
-repository (private at the time of writing). A public copy URL belongs here once it
-exists. In short: newline-delimited JSON over the unix socket, requests with an `id`,
+The protocol is documented in [`docs/ib-shim-protocol.md`](docs/ib-shim-protocol.md) in this
+repository. In short: newline-delimited JSON over the unix socket, requests with an `id`,
 responses, and events with a per-process `seq`; money and quantities are decimal strings.
 
 ## What it needs at run time
