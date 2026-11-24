@@ -134,7 +134,7 @@ the client refuse to start when an op it needs is missing.
 | `account_summary` | `req_id`, `group`, `tags` | `{}` | **subscription**: events `account_summary` with `snapshot=true` …, `account_summary_end`, then live updates with `snapshot=false` until `cancel_account_summary` |
 | `cancel_account_summary` | `req_id` | `{}` | |
 | `account_updates` | `subscribe` (bool), `account` | `{}` | events `account_value`, `portfolio`, `account_time`, `account_download_end` |
-| `market_data` | `req_id`, `contract`, `generic_ticks`, `snapshot` (bool) | `{}` | events `tick_price`, `tick_size`, `tick_string`, `tick_generic`, `tick_snapshot_end` |
+| `market_data` | `req_id`, `contract`, `generic_ticks`, `snapshot` (bool) | `{}` | events `tick_price`, `tick_size`, `tick_string`, `tick_generic`, `tick_snapshot_end`; the shim always sends `regulatorySnapshot=false` (a regulatory snapshot is a paid per-request call) and no request key changes it |
 | `cancel_market_data` | `req_id` | `{}` | |
 | `market_data_type` | `type` (1 live, 2 frozen, 3 delayed, 4 delayed-frozen) | `{}` | |
 | `historical_data` | `req_id`, `contract`, `end_time` (RFC 3339 or empty = now), `duration` (IB duration string, e.g. `1 D`), `bar_size` (IB bar size string, e.g. `1 min`), `what_to_show`, `use_rth` (bool), `keep_up_to_date` (bool) | `{}` | events `historical_bar` …, `historical_data_end`; with `keep_up_to_date` further `historical_bar` events with `update=true` until cancelled |
