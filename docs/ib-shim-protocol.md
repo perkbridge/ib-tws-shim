@@ -154,12 +154,34 @@ Reserved for later minors (not in v1.0): `pnl` (account level),
 optional except what IB needs for the call; the shim passes them through.
 
 `order`: `action` (`BUY`/`SELL`), `order_type` (`MKT`, `LMT`, `STP`,
-`STP LMT`), `total_quantity` (string), `lmt_price` (string),
+`STP LMT`, `TRAIL`), `total_quantity` (string), `lmt_price` (string),
 `aux_price` (string), `tif` (`DAY`, `GTC`, `GTD`, `IOC`, `FOK`; `GTD`
 requires `good_till_date`), `order_ref`,
 `account`, `oca_group`, `oca_type` (int), `parent_id`, `transmit`
 (bool), `outside_rth` (bool), `good_till_date` (RFC 3339), `what_if` (bool). Fields the client does
 not set are omitted and the shim leaves the IB defaults.
+
+Native protection fields (additive, shim after v0.2.0; NOT VERIFIED against
+the real IB library or a gateway):
+
+- `order_type` `TRAIL`: a trailing stop. `aux_price` is the trailing
+  distance in price (required, greater than zero); `lmt_price` is refused.
+  The current stop is reported in `trail_stop_price`.
+- `trigger_method` (int): IB's trigger method for a stop: `0` default, `1`
+  double bid/ask, `2` last, `3` double last, `4` bid/ask, `7` last or
+  bid/ask, `8` mid-point. Other values are refused.
+- `good_after_time` (RFC 3339): the order does not work before this time
+  (the shim converts it to IB's `yyyyMMdd HH:mm:ss UTC`).
+- An adjustable stop (a `STP` that becomes another order once
+  `trigger_price` is reached): `trigger_price` and `adjusted_order_type`
+  (`STP` or `TRAIL`) are required together, only on a `STP` order. An
+  adjustment to `STP` carries `adjusted_stop_price` only; an adjustment to
+  `TRAIL` carries `adjusted_trailing_amount` (a price distance) only. All
+  prices and amounts are decimal strings greater than zero.
+
+A request that breaks these rules is refused `bad_request` and nothing
+reaches IB. The same fields are reported in `open_order` when the venue
+holds them (unset values omitted, except that `trigger_method` is `0` when IB's default applies; times as IB reports them).
 
 `order` in `open_order` and `completed_order` also carries what the venue
 reports about an order (v0.2.0, additive; never accepted in an order to

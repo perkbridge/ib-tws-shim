@@ -282,6 +282,83 @@ class IbVenueTest {
         }
     }
 
+    private static final String PK = "\"contract\":{\"symbol\":\"AAPL\",\"sec_type\":\"STK\",\"exchange\":\"SMART\",\"currency\":\"USD\"}";
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void trailOrderAndNativeProtectionFieldsReachIbAndAreReported() throws Exception {
+        try (TestClient c = hello()) {
+            connect(c);
+            // a native trailing stop that works from a given time, triggered by bid/ask
+            Map<String, Object> r = c.call("place_order", "{\"order_id\":20," + PK
+                    + ",\"order\":{\"action\":\"SELL\",\"order_type\":\"TRAIL\",\"total_quantity\":\"10\",\"aux_price\":\"1.25\","
+                    + "\"trigger_method\":4,\"good_after_time\":\"2026-11-25T14:30:00Z\",\"tif\":\"GTC\"}}");
+            assertEquals(Boolean.TRUE, r.get("ok"), String.valueOf(r));
+            Map<String, Object> d = (Map<String, Object>) c.waitEvent("open_order", 3000).get("data");
+            Map<String, Object> o = (Map<String, Object>) d.get("order");
+            assertEquals("TRAIL", o.get("order_type"));
+            assertEquals("1.25", o.get("aux_price"));
+            assertEquals(4L, o.get("trigger_method"));
+            assertEquals("20261125 14:30:00 UTC", o.get("good_after_time"));
+            assertFalse(o.containsKey("trigger_price"), "IB's unset sentinel must be omitted");
+            assertFalse(o.containsKey("adjusted_order_type"));
+            assertEquals(4, EClientSocket.lastOrder.triggerMethod());
+            assertEquals("20261125 14:30:00 UTC", EClientSocket.lastOrder.goodAfterTime());
+
+            // an adjustable stop that becomes a TRAIL, and one that becomes a STP
+            assertEquals(Boolean.TRUE, c.call("place_order", "{\"order_id\":21," + PK
+                    + ",\"order\":{\"action\":\"SELL\",\"order_type\":\"STP\",\"total_quantity\":\"10\",\"aux_price\":\"95\","
+                    + "\"trigger_price\":\"105\",\"adjusted_order_type\":\"TRAIL\",\"adjusted_trailing_amount\":\"2\"}}").get("ok"));
+            assertEquals(105.0, EClientSocket.lastOrder.triggerPrice());
+            assertEquals("TRAIL", EClientSocket.lastOrder.adjustedOrderType().getApiString());
+            assertEquals(2.0, EClientSocket.lastOrder.adjustedTrailingAmount());
+            assertEquals(Double.MAX_VALUE, EClientSocket.lastOrder.adjustedStopPrice());
+            Map<String, Object> o2 = (Map<String, Object>) ((Map<String, Object>) c.waitEvent("open_order", 3000).get("data")).get("order");
+            assertEquals("105", o2.get("trigger_price"));
+            assertEquals("TRAIL", o2.get("adjusted_order_type"));
+            assertEquals("2", o2.get("adjusted_trailing_amount"));
+            assertEquals(Boolean.TRUE, c.call("place_order", "{\"order_id\":22," + PK
+                    + ",\"order\":{\"action\":\"BUY\",\"order_type\":\"STP\",\"total_quantity\":\"10\",\"aux_price\":\"105\","
+                    + "\"trigger_price\":\"95\",\"adjusted_order_type\":\"STP\",\"adjusted_stop_price\":\"100.5\"}}").get("ok"));
+            assertEquals(100.5, EClientSocket.lastOrder.adjustedStopPrice());
+            assertEquals(Double.MAX_VALUE, EClientSocket.lastOrder.adjustedTrailingAmount());
+        }
+    }
+
+    @Test
+    void badProtectionFieldsAreRefusedWithoutCallingIb() throws Exception {
+        try (TestClient c = hello()) {
+            connect(c);
+            String t = "\"action\":\"SELL\",\"total_quantity\":\"10\"";
+            String[] bad = {
+                "\"order_type\":\"TRAIL\"," + t, // no distance
+                "\"order_type\":\"TRAIL\"," + t + ",\"aux_price\":\"0\"",
+                "\"order_type\":\"TRAIL\"," + t + ",\"aux_price\":\"-1\"",
+                "\"order_type\":\"TRAIL\"," + t + ",\"aux_price\":\"1\",\"lmt_price\":\"5\"",
+                "\"order_type\":\"MKT\"," + t + ",\"trigger_method\":5", // not an IB method
+                "\"order_type\":\"MKT\"," + t + ",\"trigger_method\":\"4\"",
+                "\"order_type\":\"MKT\"," + t + ",\"good_after_time\":\"later\"",
+                "\"order_type\":\"MKT\"," + t + ",\"good_after_time\":5",
+                // adjustments only on STP, naming exactly the target's fields
+                "\"order_type\":\"LMT\"," + t + ",\"lmt_price\":\"1\",\"trigger_price\":\"2\",\"adjusted_order_type\":\"STP\",\"adjusted_stop_price\":\"3\"",
+                "\"order_type\":\"STP\"," + t + ",\"aux_price\":\"1\",\"trigger_price\":\"2\"", // no target type
+                "\"order_type\":\"STP\"," + t + ",\"aux_price\":\"1\",\"adjusted_order_type\":\"TRAIL\",\"adjusted_trailing_amount\":\"1\"", // no trigger
+                "\"order_type\":\"STP\"," + t + ",\"aux_price\":\"1\",\"trigger_price\":\"2\",\"adjusted_order_type\":\"MKT\"",
+                "\"order_type\":\"STP\"," + t + ",\"aux_price\":\"1\",\"trigger_price\":\"2\",\"adjusted_order_type\":\"TRAIL\"", // no amount
+                "\"order_type\":\"STP\"," + t + ",\"aux_price\":\"1\",\"trigger_price\":\"2\",\"adjusted_order_type\":\"TRAIL\",\"adjusted_trailing_amount\":\"1\",\"adjusted_stop_price\":\"1\"",
+                "\"order_type\":\"STP\"," + t + ",\"aux_price\":\"1\",\"trigger_price\":\"2\",\"adjusted_order_type\":\"STP\"", // no price
+                "\"order_type\":\"STP\"," + t + ",\"aux_price\":\"1\",\"trigger_price\":\"2\",\"adjusted_order_type\":\"STP\",\"adjusted_stop_price\":\"3\",\"adjusted_trailing_amount\":\"1\"",
+                "\"order_type\":\"STP\"," + t + ",\"aux_price\":\"1\",\"trigger_price\":\"0\",\"adjusted_order_type\":\"STP\",\"adjusted_stop_price\":\"3\"",
+                "\"order_type\":\"STP\"," + t + ",\"aux_price\":\"1\",\"trigger_price\":2,\"adjusted_order_type\":\"STP\",\"adjusted_stop_price\":\"3\"",
+                "\"order_type\":\"STP\"," + t + ",\"aux_price\":\"1\",\"trigger_price\":null",
+            };
+            for (String b : bad) {
+                assertEquals("bad_request", code(c.call("place_order", "{\"order_id\":5," + PK + ",\"order\":{" + b + "}}")), b);
+            }
+            assertFalse(EClientSocket.calls.stream().anyMatch(s -> s.startsWith("placeOrder")), "no bad order may reach IB");
+        }
+    }
+
     @Test
     void cancelOrderAndCancelAllReachIb() throws Exception {
         try (TestClient c = hello()) {
