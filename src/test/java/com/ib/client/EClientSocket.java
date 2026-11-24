@@ -97,7 +97,7 @@ public class EClientSocket {
     }
     public void cancelPositions() { calls.add("cancelPositions"); }
     public void reqMktData(int id, Contract c, String ticks, boolean snap, boolean reg, List<Object> opts) {
-        calls.add("reqMktData " + id + " snap=" + snap);
+        calls.add("reqMktData " + id + " snap=" + snap + " reg=" + reg);
         for (int i = 0; i < 5; i++) { final int n = i; post(() -> wrapper.tickPrice(id, 1, 100 + n, new TickAttrib())); }
     }
     public void cancelMktData(int id) { calls.add("cancelMktData " + id); }

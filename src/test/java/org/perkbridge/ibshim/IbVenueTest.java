@@ -429,6 +429,39 @@ class IbVenueTest {
         }
     }
 
+    /**
+     * PO rule: a regulatory snapshot is a paid per-request market data call, so reqMktData's
+     * regulatorySnapshot argument is always false: for streaming and snapshot requests, and
+     * whatever a client puts in the request (the argument is not part of the protocol).
+     */
+    @Test
+    void marketDataNeverAsksForARegulatorySnapshot() throws Exception {
+        try (TestClient c = hello()) {
+            connect(c);
+            String[] requests = {
+                "{\"req_id\":11,\"contract\":{\"symbol\":\"AAPL\"},\"snapshot\":false}",
+                "{\"req_id\":12,\"contract\":{\"symbol\":\"AAPL\"},\"snapshot\":true}",
+                "{\"req_id\":13,\"contract\":{\"symbol\":\"AAPL\"},\"generic_ticks\":\"233\",\"snapshot\":true,\"regulatory_snapshot\":true}",
+                "{\"req_id\":14,\"contract\":{\"symbol\":\"AAPL\"},\"regulatorySnapshot\":true}",
+            };
+            for (String r : requests) {
+                assertEquals(Boolean.TRUE, c.call("market_data", r).get("ok"), r);
+            }
+            List<String> mkt = new java.util.ArrayList<>();
+            synchronized (EClientSocket.calls) {
+                for (String call : EClientSocket.calls) {
+                    if (call.startsWith("reqMktData ")) {
+                        mkt.add(call);
+                    }
+                }
+            }
+            assertEquals(4, mkt.size(), mkt.toString());
+            for (String call : mkt) {
+                assertTrue(call.endsWith(" reg=false"), call);
+            }
+        }
+    }
+
     @Test
     void aGatewayThatClosesDuringTheHandshakeFailsConnectAtOnceWithItsFirstError() throws Exception {
         try (TestClient c = hello()) {
