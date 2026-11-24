@@ -181,7 +181,7 @@ the real IB library or a gateway):
 
 A request that breaks these rules is refused `bad_request` and nothing
 reaches IB. The same fields are reported in `open_order` when the venue
-holds them (unset values omitted; times as IB reports them).
+holds them (unset values omitted, except that `trigger_method` is `0` when IB's default applies; times as IB reports them).
 
 `order` in `open_order` and `completed_order` also carries what the venue
 reports about an order (v0.2.0, additive; never accepted in an order to

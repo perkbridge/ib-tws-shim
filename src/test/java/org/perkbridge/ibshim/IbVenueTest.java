@@ -310,7 +310,7 @@ class IbVenueTest {
                     + ",\"order\":{\"action\":\"SELL\",\"order_type\":\"STP\",\"total_quantity\":\"10\",\"aux_price\":\"95\","
                     + "\"trigger_price\":\"105\",\"adjusted_order_type\":\"TRAIL\",\"adjusted_trailing_amount\":\"2\"}}").get("ok"));
             assertEquals(105.0, EClientSocket.lastOrder.triggerPrice());
-            assertEquals("TRAIL", EClientSocket.lastOrder.getAdjustedOrderType());
+            assertEquals("TRAIL", EClientSocket.lastOrder.adjustedOrderType().getApiString());
             assertEquals(2.0, EClientSocket.lastOrder.adjustedTrailingAmount());
             assertEquals(Double.MAX_VALUE, EClientSocket.lastOrder.adjustedStopPrice());
             Map<String, Object> o2 = (Map<String, Object>) ((Map<String, Object>) c.waitEvent("open_order", 3000).get("data")).get("order");

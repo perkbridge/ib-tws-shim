@@ -234,7 +234,7 @@ final class Mapper {
             switch (row.kind()) {
                 case STR -> {
                     String s = v instanceof String str ? str : (v instanceof Number ? v.toString() : Reflect.apiString(v));
-                    if (s != null && !s.isEmpty()) {
+                    if (s != null && !s.isEmpty() && !(row.json().equals("adjusted_order_type") && s.equals("None"))) {
                         m.put(row.json(), s);
                     }
                 }
