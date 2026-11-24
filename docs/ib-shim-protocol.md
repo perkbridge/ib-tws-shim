@@ -102,7 +102,7 @@ The first request on a connection must be `hello`.
 
 ```json
 {"id":"1","op":"hello","args":{"protocol":"perkbridge.ibshim/v1","client":"example-client/1.0"}}
-{"id":"1","ok":true,"result":{"protocol":"perkbridge.ibshim/v1","shim":"ib-tws-shim/0.2.0",
+{"id":"1","ok":true,"result":{"protocol":"perkbridge.ibshim/v1","shim":"ib-tws-shim/0.3.0",
   "api_client":"<version string reported by the IB client library>",
   "ops":["connect","disconnect",...]}}
 ```
@@ -161,7 +161,7 @@ requires `good_till_date`), `order_ref`,
 (bool), `outside_rth` (bool), `good_till_date` (RFC 3339), `what_if` (bool). Fields the client does
 not set are omitted and the shim leaves the IB defaults.
 
-Native protection fields (additive, shim after v0.2.0; NOT VERIFIED against
+Native protection fields (additive, shim v0.3.0; NOT VERIFIED against
 the real IB library or a gateway):
 
 - `order_type` `TRAIL`: a trailing stop. `aux_price` is the trailing
