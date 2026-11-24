@@ -41,8 +41,12 @@ public final class IbVenue implements Venue {
             "right", "multiplier");
     private static final Set<String> ORDER_KEYS = Set.of("action", "order_type", "total_quantity", "lmt_price",
             "aux_price", "tif", "order_ref", "account", "oca_group", "oca_type", "parent_id", "transmit",
-            "outside_rth", "good_till_date", "what_if");
-    private static final Set<String> ORDER_TYPES = Set.of("MKT", "LMT", "STP", "STP LMT");
+            "outside_rth", "good_till_date", "what_if", "trigger_method", "good_after_time", "trigger_price",
+            "adjusted_order_type", "adjusted_stop_price", "adjusted_trailing_amount");
+    private static final Set<String> ORDER_TYPES = Set.of("MKT", "LMT", "STP", "STP LMT", "TRAIL");
+    /** IB's trigger methods: default, double bid/ask, last, double last, bid/ask, last or bid/ask, mid-point. */
+    private static final Set<Long> TRIGGER_METHODS = Set.of(0L, 1L, 2L, 3L, 4L, 7L, 8L);
+    private static final Set<String> ADJUSTED_TYPES = Set.of("STP", "TRAIL");
     private static final Set<String> TIFS = Set.of("DAY", "GTC", "GTD", "IOC", "FOK");
 
     private final Log log;
@@ -647,11 +651,12 @@ public final class IbVenue implements Venue {
         if ((type.equals("LMT") || type.equals("STP LMT")) && !o.containsKey("lmt_price")) {
             throw new IllegalArgumentException("order.lmt_price is required for " + type);
         }
-        if ((type.equals("STP") || type.equals("STP LMT")) && !o.containsKey("aux_price")) {
+        if ((type.equals("STP") || type.equals("STP LMT") || type.equals("TRAIL")) && !o.containsKey("aux_price")) {
             throw new IllegalArgumentException("order.aux_price (the stop price) is required for " + type);
         }
         decimalAny(o, "lmt_price"); // spreads and some futures trade at negative prices
         decimalAny(o, "aux_price");
+        checkProtectionFields(o, type);
         if (o.containsKey("tif")) {
             String tif = reqStr(o, "tif");
             if (!TIFS.contains(tif)) {
@@ -667,6 +672,9 @@ public final class IbVenue implements Venue {
         Map<String, Object> copy = new LinkedHashMap<>(o);
         if (copy.containsKey("good_till_date")) {
             copy.put("good_till_date", Times.toIb(reqStr(copy, "good_till_date")));
+        }
+        if (copy.containsKey("good_after_time")) {
+            copy.put("good_after_time", Times.toIb(reqStr(copy, "good_after_time")));
         }
         Mapper.in(copy, Mapper.ORDER, order);
         callAmbiguous("placeOrder", (long) orderId, contract, order);
@@ -1229,7 +1237,8 @@ public final class IbVenue implements Venue {
     }
 
     private static void checkOrderTypes(Map<String, Object> o) {
-        for (String k : new String[] {"action", "order_type", "tif", "order_ref", "account", "oca_group", "good_till_date"}) {
+        for (String k : new String[] {"action", "order_type", "tif", "order_ref", "account", "oca_group", "good_till_date",
+            "good_after_time", "adjusted_order_type"}) {
             if (o.get(k) != null && !(o.get(k) instanceof String)) {
                 throw new IllegalArgumentException("order." + k + " must be a string");
             }
@@ -1242,9 +1251,58 @@ public final class IbVenue implements Venue {
         if (o.get("parent_id") != null) {
             intIn(o, "parent_id", 0, Integer.MAX_VALUE);
         }
-        for (String k : new String[] {"total_quantity", "lmt_price", "aux_price"}) {
+        for (String k : new String[] {"total_quantity", "lmt_price", "aux_price", "trigger_price", "adjusted_stop_price",
+            "adjusted_trailing_amount"}) {
             if (o.get(k) != null && !(o.get(k) instanceof String)) {
                 throw new IllegalArgumentException("order." + k + " must be a decimal string");
+            }
+        }
+    }
+
+    /**
+     * Native protection fields (ADR-060 Am.6 section 6). Same rules as the client's own check, so a
+     * request that reaches IB is one IB can read: a TRAIL order carries its distance in aux_price and
+     * no limit price; an adjustment (a stop that becomes a STP or a TRAIL when trigger_price is
+     * reached) belongs to a STP order and names exactly the fields of its target type.
+     */
+    private static void checkProtectionFields(Map<String, Object> o, String type) {
+        if (type.equals("TRAIL")) {
+            decimal(o, "aux_price", true, true); // the trailing distance, never zero or negative
+            if (o.containsKey("lmt_price")) {
+                throw new IllegalArgumentException("order.lmt_price is not allowed for TRAIL");
+            }
+        }
+        if (o.containsKey("trigger_method")) {
+            Object m = o.get("trigger_method");
+            if (!(m instanceof Long l) || !TRIGGER_METHODS.contains(l)) {
+                throw new IllegalArgumentException("order.trigger_method must be one of 0, 1, 2, 3, 4, 7, 8");
+            }
+        }
+        if (o.containsKey("good_after_time")) {
+            Times.toIb(reqStr(o, "good_after_time")); // refuses anything but RFC 3339
+        }
+        boolean adjusting = o.containsKey("adjusted_order_type") || o.containsKey("trigger_price")
+                || o.containsKey("adjusted_stop_price") || o.containsKey("adjusted_trailing_amount");
+        if (!adjusting) {
+            return;
+        }
+        if (!type.equals("STP")) {
+            throw new IllegalArgumentException("order: an adjustment (trigger_price, adjusted_*) is allowed on a STP order only");
+        }
+        String to = o.containsKey("adjusted_order_type") ? reqStr(o, "adjusted_order_type") : "";
+        if (!ADJUSTED_TYPES.contains(to)) {
+            throw new IllegalArgumentException("order.adjusted_order_type must be one of " + new java.util.TreeSet<>(ADJUSTED_TYPES));
+        }
+        decimal(o, "trigger_price", true, true);
+        if (to.equals("TRAIL")) {
+            decimal(o, "adjusted_trailing_amount", true, true);
+            if (o.containsKey("adjusted_stop_price")) {
+                throw new IllegalArgumentException("order: an adjustment to TRAIL carries adjusted_trailing_amount only");
+            }
+        } else {
+            decimal(o, "adjusted_stop_price", true, true);
+            if (o.containsKey("adjusted_trailing_amount")) {
+                throw new IllegalArgumentException("order: an adjustment to STP carries adjusted_stop_price only");
             }
         }
     }

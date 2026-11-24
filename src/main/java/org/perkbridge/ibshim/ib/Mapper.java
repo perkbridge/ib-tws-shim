@@ -66,6 +66,13 @@ final class Mapper {
         r("outside_rth", Kind.BOOL, "outsideRth"),
         r("good_till_date", Kind.STR, "goodTillDate"),
         r("what_if", Kind.BOOL, "whatIf"),
+        // native protections (ADR-060 Am.6 section 6); NOT VERIFIED against the real library
+        r("trigger_method", Kind.INT, "triggerMethod"),
+        r("good_after_time", Kind.STR, "goodAfterTime"),
+        r("trigger_price", Kind.DEC, "triggerPrice"),
+        r("adjusted_order_type", Kind.STR, "adjustedOrderType", "getAdjustedOrderType"),
+        r("adjusted_stop_price", Kind.DEC, "adjustedStopPrice"),
+        r("adjusted_trailing_amount", Kind.DEC, "adjustedTrailingAmount"),
     };
 
     /**
@@ -262,6 +269,7 @@ final class Mapper {
                 case STR -> v.toString();
                 case INT -> v;
                 case DEC -> row.json().equals("strike") || row.json().endsWith("price")
+                        || row.json().equals("adjusted_trailing_amount")
                         ? (Object) new BigDecimal(v.toString()).doubleValue()
                         : v.toString();
                 case BOOL -> v;

@@ -28,4 +28,13 @@ public class Order {
     public int permId() { return permId; } public void permId(int v) { permId = v; }
     public double trailStopPrice() { return trailStopPrice; } public void trailStopPrice(double v) { trailStopPrice = v; }
     public double trailingPercent() { return trailingPercent; } public void trailingPercent(double v) { trailingPercent = v; }
+    // native protections (names as IB's Order; a double, NOT the real library)
+    private int triggerMethod; private String goodAfterTime, adjustedOrderType;
+    private double triggerPrice = Double.MAX_VALUE, adjustedStopPrice = Double.MAX_VALUE, adjustedTrailingAmount = Double.MAX_VALUE;
+    public int triggerMethod() { return triggerMethod; } public void triggerMethod(int v) { triggerMethod = v; }
+    public String goodAfterTime() { return goodAfterTime; } public void goodAfterTime(String v) { goodAfterTime = v; }
+    public double triggerPrice() { return triggerPrice; } public void triggerPrice(double v) { triggerPrice = v; }
+    public String getAdjustedOrderType() { return adjustedOrderType; } public void adjustedOrderType(String v) { adjustedOrderType = v; }
+    public double adjustedStopPrice() { return adjustedStopPrice; } public void adjustedStopPrice(double v) { adjustedStopPrice = v; }
+    public double adjustedTrailingAmount() { return adjustedTrailingAmount; } public void adjustedTrailingAmount(double v) { adjustedTrailingAmount = v; }
 }
